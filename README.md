@@ -19,7 +19,9 @@ device, or require root.
 These dependencies are present in a standard Omarchy 4 desktop. Applications
 with incomplete accessibility support may expose only some controls—or none.
 Chromium and Electron accessibility trees are requested automatically when the
-overlay opens.
+overlay opens. OmaJump integrates directly with the built-in Omarchy bar's
+clickable widgets because Quickshell layer surfaces do not expose them through
+AT-SPI.
 
 ## Install
 
@@ -74,6 +76,8 @@ plugins before enabling them. OmaJump's helper reads the AT-SPI trees of visible
 windows on the focused monitor and their Hyprland geometry. Accessible names
 remain in the helper and are neither sent to QML nor stored. Only anonymous
 rectangles, numeric IDs, and generated labels cross the local process pipe.
+Bar-widget geometry and activation stay inside the existing Omarchy Shell
+process.
 
 ## Development
 

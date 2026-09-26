@@ -18,6 +18,7 @@ Item {
   property var activeScreen: Quickshell.screens.length > 0 ? Quickshell.screens[0] : null
   property string typedPrefix: ""
   property string statusText: ""
+  property var barActivations: []
   readonly property string alphabet: "asdfghjkl"
 
   function pluginId() {
@@ -49,6 +50,81 @@ Item {
     typedPrefix = ""
     statusText = ""
     activationPending = false
+    barActivations = []
+  }
+
+  function generateLabels(count) {
+    if (count <= 0) return []
+    var leaves = alphabet.split("")
+    while (leaves.length < count) {
+      var shortest = leaves[0].length
+      for (var i = 1; i < leaves.length; i++)
+        shortest = Math.min(shortest, leaves[i].length)
+      var expandAt = -1
+      for (var j = 0; j < leaves.length; j++)
+        if (leaves[j].length === shortest) expandAt = j
+      var prefix = leaves.splice(expandAt, 1)[0]
+      var expanded = []
+      for (var k = 0; k < alphabet.length; k++)
+        expanded.push(prefix + alphabet[k])
+      leaves.splice.apply(leaves, [expandAt, 0].concat(expanded))
+    }
+    var ranked = []
+    for (var index = 0; index < leaves.length; index++)
+      ranked.push({ label: leaves[index], order: index })
+    ranked.sort(function(left, right) {
+      return left.label.length - right.label.length || left.order - right.order
+    })
+    var labels = []
+    for (var rank = 0; rank < count; rank++) labels.push(ranked[rank].label)
+    return labels
+  }
+
+  function collectBarTargets() {
+    var rows = []
+    var bar = root.shell && root.shell.bar ? root.shell.bar : null
+    if (!bar || !bar.clickTargets || !root.activeScreen) return rows
+
+    var screenName = String(root.activeScreen.name || "")
+    for (var index = 0; index < bar.clickTargets.length; index++) {
+      var target = bar.clickTargets[index]
+      if (!target || (typeof bar.moduleTargetClickable === "function"
+          && !bar.moduleTargetClickable(target))) continue
+
+      var window = null
+      try {
+        window = typeof bar.targetWindow === "function"
+          ? bar.targetWindow(target)
+          : (target.QsWindow ? target.QsWindow.window : null)
+      } catch (error) {
+        continue
+      }
+      if (!window || !window.screen || String(window.screen.name || "") !== screenName
+          || !window.contentItem) continue
+
+      var point
+      try {
+        point = target.mapToItem(window.contentItem, 0, 0)
+        if (typeof bar.windowScreenPoint === "function")
+          point = bar.windowScreenPoint(point, window)
+      } catch (error) {
+        continue
+      }
+      var width = Number(target.width || 0)
+      var height = Number(target.height || 0)
+      if (width <= 1 || height <= 1) continue
+
+      var activationIndex = barActivations.length
+      barActivations.push(target)
+      rows.push({
+        targetId: -(activationIndex + 1),
+        targetX: Number(point.x || 0),
+        targetY: Number(point.y || 0),
+        targetWidth: width,
+        targetHeight: height
+      })
+    }
+    return rows
   }
 
   function open(payloadJson) {
@@ -66,6 +142,7 @@ Item {
     scanning = false
     overlayVisible = false
     activationPending = false
+    barActivations = []
     targets.clear()
     typedPrefix = ""
     statusText = ""
@@ -108,17 +185,29 @@ Item {
     scanning = false
     activeScreen = screenNamed(payload.monitor || "")
     targets.clear()
+    barActivations = []
+    var combined = []
     var rows = Array.isArray(payload.targets) ? payload.targets : []
     for (var index = 0; index < rows.length; index++) {
       var row = rows[index]
-      targets.append({
+      combined.push({
         targetId: Number(row.id),
-        label: String(row.label),
         targetX: Number(row.x),
         targetY: Number(row.y),
         targetWidth: Number(row.width),
         targetHeight: Number(row.height)
       })
+    }
+    combined = combined.concat(collectBarTargets())
+    combined.sort(function(left, right) {
+      return Math.round(left.targetY / 8) - Math.round(right.targetY / 8)
+        || left.targetX - right.targetX || left.targetY - right.targetY
+    })
+    var labels = generateLabels(combined.length)
+    for (var targetIndex = 0; targetIndex < combined.length; targetIndex++) {
+      var target = combined[targetIndex]
+      target.label = labels[targetIndex]
+      targets.append(target)
     }
     overlayVisible = true
     if (targets.count === 0) {
@@ -154,14 +243,14 @@ Item {
 
   function updatePrefix(nextPrefix) {
     typedPrefix = nextPrefix
-    var exactId = -1
+    var exactId = null
     var remaining = 0
     for (var index = 0; index < targets.count; index++) {
       var row = targets.get(index)
       if (row.label.indexOf(typedPrefix) === 0) remaining++
       if (row.label === typedPrefix) exactId = row.targetId
     }
-    if (exactId >= 0) activate(exactId)
+    if (exactId !== null) activate(exactId)
     else if (remaining === 0) typedPrefix = ""
   }
 
@@ -177,7 +266,24 @@ Item {
   }
 
   function activate(targetId) {
-    if (activationPending || !helper.running) return
+    if (activationPending) return
+    if (targetId < 0) {
+      var barTarget = barActivations[-targetId - 1]
+      if (!barTarget || typeof barTarget.triggerPress !== "function") {
+        showTransient("That bar control is no longer available")
+        return
+      }
+      activationPending = true
+      try {
+        barTarget.triggerPress(Qt.LeftButton)
+        root.dismiss()
+      } catch (error) {
+        activationPending = false
+        showTransient("The bar rejected the action")
+      }
+      return
+    }
+    if (!helper.running) return
     activationPending = true
     statusText = "Activating…"
     helper.write(JSON.stringify({ type: "activate", id: targetId }) + "\n")
