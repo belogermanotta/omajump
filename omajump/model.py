@@ -58,6 +58,10 @@ class Client:
     pid: int
     rect: Rect
     monitor_id: int
+    workspace_id: int = -1
+    focus_history_id: int = -1
+    fullscreen: int = 0
+    title: str = ""
 
 
 @dataclass(slots=True)

@@ -5,7 +5,7 @@
   "version": "0.1.0",
   "author": "OmaJump contributors",
   "license": "MIT",
-  "description": "Navigate the focused application with home-row keyboard hints",
+  "description": "Navigate visible applications with home-row keyboard hints",
   "kinds": [
     "overlay"
   ],

@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import argparse
+import difflib
 import json
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from typing import Any, Callable, Iterable
 
@@ -89,31 +91,10 @@ def _json_command(*args: str) -> Any:
         raise BackendError("hyprland-unavailable", f"Could not query Hyprland: {error}") from error
 
 
-def _active_geometry() -> tuple[Client, Monitor]:
-    active = _json_command("hyprctl", "-j", "activewindow")
+def _screen_geometry() -> tuple[list[Client], Monitor]:
     monitors_json = _json_command("hyprctl", "-j", "monitors")
-    if not active or int(active.get("pid", 0)) <= 0:
-        raise BackendError("no-active-window", "No application window is focused")
-
-    client = Client(
-        pid=int(active["pid"]),
-        rect=Rect(
-            float(active.get("at", [0, 0])[0]),
-            float(active.get("at", [0, 0])[1]),
-            float(active.get("size", [0, 0])[0]),
-            float(active.get("size", [0, 0])[1]),
-        ),
-        monitor_id=int(active.get("monitor", -1)),
-    )
-    if client.rect.width <= 1 or client.rect.height <= 1:
-        raise BackendError("no-active-window", "The focused window has no visible area")
-
-    monitor_data = next(
-        (item for item in monitors_json if int(item.get("id", -2)) == client.monitor_id),
-        None,
-    )
-    if monitor_data is None:
-        monitor_data = next((item for item in monitors_json if item.get("focused")), None)
+    clients_json = _json_command("hyprctl", "-j", "clients")
+    monitor_data = next((item for item in monitors_json if item.get("focused")), None)
     if monitor_data is None:
         raise BackendError("no-monitor", "Could not identify the focused monitor")
 
@@ -133,7 +114,43 @@ def _active_geometry() -> tuple[Client, Monitor]:
         scale=scale,
         monitor_id=int(monitor_data.get("id", -1)),
     )
-    return client, monitor
+    workspace_id = int(monitor_data.get("activeWorkspace", {}).get("id", -1))
+    clients: list[Client] = []
+    for item in clients_json:
+        item_workspace = int(item.get("workspace", {}).get("id", -2))
+        at = item.get("at", [0, 0])
+        size = item.get("size", [0, 0])
+        client = Client(
+            pid=int(item.get("pid", 0)),
+            rect=Rect(float(at[0]), float(at[1]), float(size[0]), float(size[1])),
+            monitor_id=int(item.get("monitor", -2)),
+            workspace_id=item_workspace,
+            focus_history_id=int(item.get("focusHistoryID", -1)),
+            fullscreen=int(item.get("fullscreen", 0)),
+            title=str(item.get("title", "")),
+        )
+        if (
+            client.pid > 0
+            and client.monitor_id == monitor.monitor_id
+            and client.workspace_id == workspace_id
+            and bool(item.get("mapped", True))
+            and not bool(item.get("hidden", False))
+            and client.rect.width > 1
+            and client.rect.height > 1
+            and client.rect.intersection(monitor.rect) is not None
+        ):
+            clients.append(client)
+
+    fullscreen_clients = [client for client in clients if client.fullscreen == 2]
+    if fullscreen_clients:
+        clients = fullscreen_clients
+    clients.sort(
+        key=lambda client: (
+            client.focus_history_id < 0,
+            client.focus_history_id if client.focus_history_id >= 0 else 1_000_000,
+        )
+    )
+    return clients, monitor
 
 
 def _parent_pid(pid: int) -> int:
@@ -160,9 +177,11 @@ def process_distance(left: int, right: int) -> int | None:
         return None
     left_chain = _ancestry(left)
     right_chain = _ancestry(right)
-    right_positions = {pid: index for index, pid in enumerate(right_chain)}
-    distances = [index + right_positions[pid] for index, pid in enumerate(left_chain) if pid in right_positions]
-    return min(distances) if distances else None
+    if right in left_chain:
+        return left_chain.index(right)
+    if left in right_chain:
+        return right_chain.index(left)
+    return None
 
 
 def _rect_for(node: Any, Atspi: Any) -> Rect | None:
@@ -181,6 +200,24 @@ def _role(node: Any) -> str:
         return ""
 
 
+def _title_match_score(node: Any, title: str) -> float:
+    """Return a small penalty that disambiguates same-sized app windows."""
+
+    try:
+        accessible_name = str(node.get_name() or "")
+    except Exception:
+        accessible_name = ""
+    left = " ".join(accessible_name.casefold().split())
+    right = " ".join(title.casefold().split())
+    if not left or not right:
+        return 0.5
+    if left == right:
+        return 0.0
+    if left in right or right in left:
+        return 0.1
+    return 1.0 - difflib.SequenceMatcher(None, left, right).ratio()
+
+
 def _children(node: Any, limit: int = 2000) -> list[Any]:
     children: list[Any] = []
     try:
@@ -195,6 +232,29 @@ def _children(node: Any, limit: int = 2000) -> list[Any]:
     except Exception:
         pass
     return children
+
+
+def _prime_accessibility(node: Any, timeout: float = 0.3) -> None:
+    """Wake lazy accessibility trees, notably Chromium/Electron renderers."""
+
+    if _children(node):
+        return
+    try:
+        declared_children = int(node.get_child_count())
+    except Exception:
+        declared_children = 0
+    if declared_children <= 0:
+        return
+    for method_name in ("get_attributes", "get_relation_set"):
+        try:
+            getattr(node, method_name)()
+        except Exception:
+            pass
+    deadline = time.monotonic() + max(0.0, timeout)
+    while time.monotonic() < deadline:
+        if _children(node):
+            return
+        time.sleep(0.02)
 
 
 def _top_level_frames(application: Any, Atspi: Any) -> list[tuple[Any, Rect]]:
@@ -247,33 +307,52 @@ def _has_focused_descendant(application: Any, Atspi: Any, budget: int = 2500) ->
     return False
 
 
-def _find_window(desktop: Any, client: Client, monitor: Monitor, Atspi: Any) -> tuple[Any, Rect]:
-    choices: list[tuple[float, Any, Rect]] = []
-    focused_choices: list[tuple[float, Any, Rect]] = []
+def _match_windows(
+    desktop: Any, clients: list[Client], monitor: Monitor, Atspi: Any
+) -> list[tuple[Client, Any, Rect]]:
+    inventory: list[tuple[int, Any, Any, Rect]] = []
     for application in _children(desktop, 200):
         try:
             app_pid = int(application.get_process_id())
         except Exception:
             app_pid = 0
-        frames = _top_level_frames(application, Atspi)
-        if not frames:
-            continue
-        frame, rect = min(frames, key=lambda pair: frame_match_score(pair[1], client, monitor))
-        geometry_score = frame_match_score(rect, client, monitor)
-        distance = process_distance(client.pid, app_pid)
-        if distance is not None:
-            choices.append((distance * 5 + geometry_score, frame, rect))
-        elif geometry_score < 0.25 and _has_focused_descendant(application, Atspi):
-            focused_choices.append((geometry_score, frame, rect))
-
-    available = choices or focused_choices
-    if not available:
-        raise BackendError(
-            "accessibility-window-not-found",
-            "The focused application did not expose a matching accessibility window",
+        inventory.extend(
+            (app_pid, application, frame, rect)
+            for frame, rect in _top_level_frames(application, Atspi)
         )
-    _, frame, rect = min(available, key=lambda item: item[0])
-    return frame, rect
+
+    matches: list[tuple[Client, Any, Rect]] = []
+    used: set[int] = set()
+    for client in clients:
+        choices: list[tuple[float, int]] = []
+        for index, (app_pid, _application, _frame, rect) in enumerate(inventory):
+            if index in used:
+                continue
+            distance = process_distance(client.pid, app_pid)
+            if distance is not None:
+                score = (
+                    distance * 5
+                    + frame_match_score(rect, client, monitor)
+                    + _title_match_score(_frame, client.title) * 2
+                )
+                choices.append((score, index))
+
+        # Some toolkits broker accessibility through a separate process. The
+        # focused-state fallback is safe only when there is one visible client.
+        if not choices and len(clients) == 1:
+            for index, (_app_pid, application, _frame, rect) in enumerate(inventory):
+                if index in used:
+                    continue
+                geometry_score = frame_match_score(rect, client, monitor)
+                if geometry_score < 0.25 and _has_focused_descendant(application, Atspi):
+                    choices.append((geometry_score, index))
+        if not choices:
+            continue
+        _, index = min(choices, key=lambda item: item[0])
+        used.add(index)
+        _app_pid, _application, frame, rect = inventory[index]
+        matches.append((client, frame, rect))
+    return matches
 
 
 def _action_names(node: Any) -> list[str]:
@@ -293,7 +372,7 @@ class ScanResult:
 
 
 class BackendSession:
-    def __init__(self, max_nodes: int = 6000, max_targets: int = 250) -> None:
+    def __init__(self, max_nodes: int = 6000, max_targets: int = 500) -> None:
         self.max_nodes = max_nodes
         self.max_targets = max_targets
         self.Atspi: Any = None
@@ -319,69 +398,80 @@ class BackendSession:
         context_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> dict[str, Any]:
         Atspi = self._load_atspi()
-        client, monitor = _active_geometry()
+        clients, monitor = _screen_geometry()
         if context_callback is not None:
             context_callback({"type": "context", "monitor": monitor.name})
         desktop = Atspi.get_desktop(0)
         if desktop is None:
             raise BackendError("atspi-unavailable", "The AT-SPI desktop could not be opened")
 
-        frame, frame_rect = _find_window(desktop, client, monitor, Atspi)
-        mapper = CoordinateMapper.infer(client, monitor, frame_rect)
         candidates: list[Candidate] = []
-        stack: list[tuple[Any, int, float]] = [(frame, 0, mapper.base_scale)]
         nodes_scanned = 0
+        truncated = False
+        matches = _match_windows(desktop, clients, monitor, Atspi)
+        for client, frame, frame_rect in matches:
+            _prime_accessibility(frame)
+            mapper = CoordinateMapper.infer(client, monitor, frame_rect)
+            stack: list[tuple[Any, int, float]] = [(frame, 0, mapper.base_scale)]
+            window_nodes = 0
 
-        while stack and nodes_scanned < self.max_nodes:
-            node, depth, inherited_scale = stack.pop()
-            nodes_scanned += 1
-            role = _role(node)
-            raw_rect = _rect_for(node, Atspi)
-            node_scale = (
-                mapper.derive_scale(raw_rect, inherited_scale, role)
-                if raw_rect is not None
-                else inherited_scale
-            )
-            states = _node_states(node, Atspi)
-            selected = choose_action(role, _action_names(node), states)
-
-            if (
-                raw_rect is not None
-                and selected is not None
-                and {"enabled", "showing", "visible"}.issubset(states)
-            ):
-                visible = mapper.visible_rect(raw_rect, node_scale)
-                covers_window = (
-                    visible is not None
-                    and visible.area / max(1.0, client.rect.area) >= 0.65
-                    and role not in DEFAULT_ACTION_ROLES
-                    and role not in EDITABLE_ROLES
+            while stack and window_nodes < self.max_nodes:
+                node, depth, inherited_scale = stack.pop()
+                window_nodes += 1
+                nodes_scanned += 1
+                role = _role(node)
+                raw_rect = _rect_for(node, Atspi)
+                node_scale = (
+                    mapper.derive_scale(raw_rect, inherited_scale, role)
+                    if raw_rect is not None
+                    else inherited_scale
                 )
+                states = _node_states(node, Atspi)
+                selected = choose_action(role, _action_names(node), states)
+
                 if (
-                    visible is not None
-                    and not covers_window
-                    and visible.width >= 2
-                    and visible.height >= 2
+                    raw_rect is not None
+                    and selected is not None
+                    and {"enabled", "showing", "visible"}.issubset(states)
                 ):
-                    action_index, action_name = selected
-                    candidates.append(
-                        Candidate(
-                            node=node,
-                            rect=mapper.overlay_rect(visible),
-                            role=role,
-                            action_index=action_index,
-                            action_name=action_name,
-                        )
+                    visible = mapper.visible_rect(raw_rect, node_scale)
+                    covers_window = (
+                        visible is not None
+                        and visible.area / max(1.0, client.rect.area) >= 0.65
+                        and role not in DEFAULT_ACTION_ROLES
+                        and role not in EDITABLE_ROLES
                     )
+                    if (
+                        visible is not None
+                        and not covers_window
+                        and visible.width >= 2
+                        and visible.height >= 2
+                    ):
+                        action_index, action_name = selected
+                        candidates.append(
+                            Candidate(
+                                node=node,
+                                rect=mapper.overlay_rect(visible),
+                                role=role,
+                                action_index=action_index,
+                                action_name=action_name,
+                            )
+                        )
 
-            if depth < 48:
-                stack.extend(
-                    (child, depth + 1, node_scale) for child in reversed(_children(node))
-                )
+                if depth < 48:
+                    children = _children(node)
+                    if not children:
+                        _prime_accessibility(node, timeout=0.12)
+                        children = _children(node)
+                    stack.extend(
+                        (child, depth + 1, node_scale) for child in reversed(children)
+                    )
+            truncated = truncated or bool(stack)
 
-        truncated = bool(stack)
-        candidates = deduplicate_candidates(candidates)[: self.max_targets]
-        truncated = truncated or len(candidates) >= self.max_targets
+        candidates = deduplicate_candidates(candidates)
+        if len(candidates) > self.max_targets:
+            candidates = candidates[: self.max_targets]
+            truncated = True
         self.result = ScanResult(monitor, candidates, nodes_scanned, truncated)
         labels = generate_labels(len(candidates))
 
@@ -403,6 +493,9 @@ class BackendSession:
                 "nodesScanned": nodes_scanned,
                 "truncated": truncated,
                 "scale": monitor.scale,
+                "windowsConsidered": len(clients),
+                "windowsScanned": len(matches),
+                "unsupportedWindows": len(clients) - len(matches),
             },
         }
 

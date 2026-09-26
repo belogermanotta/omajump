@@ -122,7 +122,7 @@ Item {
     }
     overlayVisible = true
     if (targets.count === 0) {
-      statusText = "No accessible controls found"
+      statusText = "No accessible controls found on this screen"
       dismissTimer.restart()
     } else {
       statusText = ""

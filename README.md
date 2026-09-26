@@ -4,9 +4,10 @@ OmaJump adds Homerow-style keyboard hints to Omarchy. Summon the overlay,
 type the home-row label shown on a control, and OmaJump invokes that control's
 accessibility action without moving the mouse.
 
-Version 0.1 targets the focused application window and supports primary
-activation, Backspace, and Escape. It does not take screenshots, connect to the
-network, create a virtual input device, or require root.
+Version 0.1 targets every visible application window on the focused monitor's
+active workspace and supports primary activation, Backspace, and Escape. It
+does not take screenshots, connect to the network, create a virtual input
+device, or require root.
 
 ## Requirements
 
@@ -17,6 +18,8 @@ network, create a virtual input device, or require root.
 
 These dependencies are present in a standard Omarchy 4 desktop. Applications
 with incomplete accessibility support may expose only some controls—or none.
+Chromium and Electron accessibility trees are requested automatically when the
+overlay opens.
 
 ## Install
 
@@ -45,7 +48,7 @@ OmaJump deliberately does not edit your bindings during installation.
 
 ## Use
 
-1. Focus the application you want to control.
+1. Focus the monitor containing the applications you want to control.
 2. Press `SUPER + ALT + CTRL + SPACE` (or your chosen binding).
 3. Type a visible hint using `a s d f g h j k l`.
 4. Use Backspace to correct a partial hint or Escape to close the overlay.
@@ -67,10 +70,10 @@ Remove the optional Hyprland binding yourself if you no longer use the plugin.
 ## Privacy and security
 
 Omarchy plugins run as unsandboxed code inside the shell, so review third-party
-plugins before enabling them. OmaJump's helper reads only the focused window's
-AT-SPI tree and Hyprland geometry. Accessible names remain in the helper and
-are neither sent to QML nor stored. Only anonymous rectangles, numeric IDs, and
-generated labels cross the local process pipe.
+plugins before enabling them. OmaJump's helper reads the AT-SPI trees of visible
+windows on the focused monitor and their Hyprland geometry. Accessible names
+remain in the helper and are neither sent to QML nor stored. Only anonymous
+rectangles, numeric IDs, and generated labels cross the local process pipe.
 
 ## Development
 
@@ -82,7 +85,7 @@ python -m unittest discover -s tests -v
 python -m compileall -q omajump scripts
 ```
 
-Run a read-only scan of the focused application without invoking any action:
+Run a read-only scan of the focused screen without invoking any action:
 
 ```bash
 python scripts/omajump_backend.py --probe | python -m json.tool
