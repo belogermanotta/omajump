@@ -1,0 +1,23 @@
+{
+  "client": {
+    "pid": 1000,
+    "x": 3114,
+    "y": 32,
+    "width": 931,
+    "height": 1042,
+    "monitorId": 1
+  },
+  "monitor": {
+    "id": 1,
+    "name": "HDMI-A-2",
+    "x": 2150,
+    "y": 0,
+    "width": 1920,
+    "height": 1080,
+    "scale": 2.0
+  },
+  "frame": [0, 0, 931, 1042],
+  "webDocument": [0, 0, 1862, 2084],
+  "target": [480, 165, 200, 60],
+  "expectedOverlay": [1204, 114.5, 100, 30]
+}

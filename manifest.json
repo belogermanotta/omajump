@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "id": "omajump",
+  "name": "OmaJump",
+  "version": "0.1.0",
+  "author": "OmaJump contributors",
+  "license": "MIT",
+  "description": "Navigate the focused application with home-row keyboard hints",
+  "kinds": [
+    "overlay"
+  ],
+  "entryPoints": {
+    "overlay": "OmaJump.qml"
+  }
+}
