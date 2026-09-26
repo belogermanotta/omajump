@@ -5,10 +5,12 @@ from __future__ import annotations
 import argparse
 import difflib
 import json
+import math
+import re
 import subprocess
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Callable, Iterable
 
 from .geometry import CoordinateMapper, deduplicate_candidates, frame_match_score
@@ -128,6 +130,7 @@ def _screen_geometry() -> tuple[list[Client], Monitor]:
             focus_history_id=int(item.get("focusHistoryID", -1)),
             fullscreen=int(item.get("fullscreen", 0)),
             title=str(item.get("title", "")),
+            address=str(item.get("address", "")),
         )
         if (
             client.pid > 0
@@ -369,6 +372,7 @@ class ScanResult:
     candidates: list[Candidate]
     nodes_scanned: int
     truncated: bool
+    fallback_clients: list[Client] = field(default_factory=list)
 
 
 class BackendSession:
@@ -409,7 +413,9 @@ class BackendSession:
         nodes_scanned = 0
         truncated = False
         matches = _match_windows(desktop, clients, monitor, Atspi)
+        fallback_clients: list[Client] = []
         for client, frame, frame_rect in matches:
+            candidate_count_before = len(candidates)
             _prime_accessibility(frame)
             mapper = CoordinateMapper.infer(client, monitor, frame_rect)
             stack: list[tuple[Any, int, float]] = [(frame, 0, mapper.base_scale)]
@@ -467,12 +473,21 @@ class BackendSession:
                         (child, depth + 1, node_scale) for child in reversed(children)
                     )
             truncated = truncated or bool(stack)
+            if len(candidates) == candidate_count_before:
+                fallback_clients.append(client)
+
+        matched_client_ids = {id(client) for client, _frame, _rect in matches}
+        fallback_clients.extend(
+            client for client in clients if id(client) not in matched_client_ids
+        )
 
         candidates = deduplicate_candidates(candidates)
         if len(candidates) > self.max_targets:
             candidates = candidates[: self.max_targets]
             truncated = True
-        self.result = ScanResult(monitor, candidates, nodes_scanned, truncated)
+        self.result = ScanResult(
+            monitor, candidates, nodes_scanned, truncated, fallback_clients
+        )
         labels = generate_labels(len(candidates))
 
         return {
@@ -489,6 +504,16 @@ class BackendSession:
                 }
                 for index, candidate in enumerate(candidates)
             ],
+            "fallbackWindows": [
+                {
+                    "id": index,
+                    "x": round(client.rect.x - monitor.rect.x, 2),
+                    "y": round(client.rect.y - monitor.rect.y, 2),
+                    "width": round(client.rect.width, 2),
+                    "height": round(client.rect.height, 2),
+                }
+                for index, client in enumerate(fallback_clients)
+            ],
             "meta": {
                 "nodesScanned": nodes_scanned,
                 "truncated": truncated,
@@ -498,6 +523,55 @@ class BackendSession:
                 "unsupportedWindows": len(clients) - len(matches),
             },
         }
+
+    def click(self, fallback_id: int, x: float, y: float) -> dict[str, Any]:
+        if self.result is None:
+            raise BackendError("not-scanned", "No accessibility scan is active")
+        if fallback_id < 0 or fallback_id >= len(self.result.fallback_clients):
+            raise BackendError("invalid-target", "The selected fallback window no longer exists")
+        if not math.isfinite(x) or not math.isfinite(y):
+            raise BackendError("invalid-target", "The selected point is invalid")
+
+        client = self.result.fallback_clients[fallback_id]
+        monitor = self.result.monitor
+        global_x = monitor.rect.x + x
+        global_y = monitor.rect.y + y
+        point = Rect(global_x, global_y, 1, 1)
+        if point.intersection(client.rect) is None or point.intersection(monitor.rect) is None:
+            raise BackendError("invalid-target", "The selected point is outside the target window")
+
+        if re.fullmatch(r"0x[0-9a-fA-F]+", client.address):
+            selector = f"address:{client.address}"
+        else:
+            selector = f"pid:{client.pid}"
+
+        # QML hides the exclusive overlay before sending this command. Give
+        # the compositor a moment to restore normal keyboard/pointer focus.
+        time.sleep(0.12)
+        commands = (
+            f'hl.dsp.focus({{ window = "{selector}" }})',
+            f"hl.dsp.cursor.move({{ x = {round(global_x)}, y = {round(global_y)} }})",
+            f'hl.dsp.send_shortcut({{ mods = "", key = "mouse:272", window = "{selector}" }})',
+        )
+        try:
+            for command in commands:
+                completed = subprocess.run(
+                    ["hyprctl", "dispatch", command],
+                    check=True,
+                    text=True,
+                    capture_output=True,
+                    timeout=1.5,
+                )
+                if completed.stdout.strip() != "ok":
+                    raise BackendError(
+                        "activation-failed",
+                        completed.stdout.strip() or "Hyprland rejected the pointer action",
+                    )
+        except (FileNotFoundError, subprocess.SubprocessError) as error:
+            raise BackendError(
+                "activation-failed", f"Could not send the pointer action: {error}"
+            ) from error
+        return {"type": "activated", "id": fallback_id, "ok": True}
 
     def activate(self, target_id: int) -> dict[str, Any]:
         if self.result is None:
@@ -545,6 +619,14 @@ def run(probe: bool = False) -> int:
             command_type = command.get("type")
             if command_type == "activate":
                 _emit(session.activate(int(command.get("id", -1))))
+            elif command_type == "click":
+                _emit(
+                    session.click(
+                        int(command.get("fallbackId", -1)),
+                        float(command.get("x", float("nan"))),
+                        float(command.get("y", float("nan"))),
+                    )
+                )
             elif command_type == "quit":
                 return 0
             else:

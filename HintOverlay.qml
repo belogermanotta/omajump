@@ -76,8 +76,11 @@ PanelWindow {
     delegate: Rectangle {
       id: badge
       required property string label
+      required property string targetKind
       required property real targetX
       required property real targetY
+      required property real targetWidth
+      required property real targetHeight
 
       visible: root.opened
         && !root.loading
@@ -85,12 +88,26 @@ PanelWindow {
         && label.indexOf(root.typedPrefix) === 0
       width: Math.max(labelText.implicitWidth + 10, root.badgeFontSize + 10)
       height: Math.max(labelText.implicitHeight + 6, root.badgeFontSize + 8)
-      x: Math.round(Math.max(2, Math.min(root.width - width - 2, targetX + 2)))
-      y: Math.round(Math.max(2, Math.min(root.height - height - 2, targetY + 2)))
+      x: Math.round(Math.max(2, Math.min(root.width - width - 2,
+        targetKind === "grid-cell" ? targetX + (targetWidth - width) / 2 : targetX + 2)))
+      y: Math.round(Math.max(2, Math.min(root.height - height - 2,
+        targetKind === "grid-cell" ? targetY + (targetHeight - height) / 2 : targetY + 2)))
       radius: root.cornerRadius
       color: root.badgeBackground
       border.width: 1
       border.color: root.badgeBorder
+
+      Rectangle {
+        visible: badge.targetKind === "grid-cell"
+        x: -badge.x + badge.targetX
+        y: -badge.y + badge.targetY
+        width: badge.targetWidth
+        height: badge.targetHeight
+        color: "transparent"
+        border.width: 1
+        border.color: root.badgeBorder
+        opacity: 0.45
+      }
 
       Text {
         id: labelText

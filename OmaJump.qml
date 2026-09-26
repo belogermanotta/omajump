@@ -19,6 +19,13 @@ Item {
   property string typedPrefix: ""
   property string statusText: ""
   property var barActivations: []
+  property var fallbackWindows: []
+  property var baseTargets: []
+  property var gridRect: null
+  property var gridHistory: []
+  property int gridFallbackId: -1
+  property int gridDepth: 0
+  property bool gridMode: false
   readonly property string alphabet: "asdfghjkl"
 
   function pluginId() {
@@ -51,6 +58,13 @@ Item {
     statusText = ""
     activationPending = false
     barActivations = []
+    fallbackWindows = []
+    baseTargets = []
+    gridRect = null
+    gridHistory = []
+    gridFallbackId = -1
+    gridDepth = 0
+    gridMode = false
   }
 
   function generateLabels(count) {
@@ -118,6 +132,8 @@ Item {
       barActivations.push(target)
       rows.push({
         targetId: -(activationIndex + 1),
+        targetKind: "bar",
+        gridIndex: -1,
         targetX: Number(point.x || 0),
         targetY: Number(point.y || 0),
         targetWidth: width,
@@ -125,6 +141,91 @@ Item {
       })
     }
     return rows
+  }
+
+  function setTargetRows(rows, generateNewLabels) {
+    targets.clear()
+    var labels = generateNewLabels ? generateLabels(rows.length) : []
+    for (var index = 0; index < rows.length; index++) {
+      var row = rows[index]
+      targets.append({
+        targetId: Number(row.targetId),
+        targetKind: String(row.targetKind || "semantic"),
+        gridIndex: Number(row.gridIndex === undefined ? -1 : row.gridIndex),
+        label: generateNewLabels ? labels[index] : String(row.label),
+        targetX: Number(row.targetX),
+        targetY: Number(row.targetY),
+        targetWidth: Number(row.targetWidth),
+        targetHeight: Number(row.targetHeight)
+      })
+    }
+  }
+
+  function showGrid(rect) {
+    gridRect = rect
+    typedPrefix = ""
+    var rows = []
+    var cellWidth = rect.width / 3
+    var cellHeight = rect.height / 3
+    for (var index = 0; index < 9; index++) {
+      var column = index % 3
+      var row = Math.floor(index / 3)
+      rows.push({
+        targetId: index,
+        targetKind: "grid-cell",
+        gridIndex: index,
+        label: alphabet[index],
+        targetX: rect.x + column * cellWidth,
+        targetY: rect.y + row * cellHeight,
+        targetWidth: cellWidth,
+        targetHeight: cellHeight
+      })
+    }
+    setTargetRows(rows, false)
+  }
+
+  function startGrid(index) {
+    if (index < 0 || index >= fallbackWindows.length) return
+    var fallback = fallbackWindows[index]
+    gridMode = true
+    gridFallbackId = Number(fallback.id)
+    gridDepth = 0
+    gridHistory = []
+    showGrid({
+      x: Number(fallback.x),
+      y: Number(fallback.y),
+      width: Number(fallback.width),
+      height: Number(fallback.height)
+    })
+  }
+
+  function refineGrid(cellIndex) {
+    if (!gridMode || !gridRect || cellIndex < 0 || cellIndex > 8) return
+    var column = cellIndex % 3
+    var row = Math.floor(cellIndex / 3)
+    var next = {
+      x: gridRect.x + column * gridRect.width / 3,
+      y: gridRect.y + row * gridRect.height / 3,
+      width: gridRect.width / 3,
+      height: gridRect.height / 3
+    }
+    if (gridDepth < 2) {
+      var history = gridHistory.slice()
+      history.push(gridRect)
+      gridHistory = history
+      gridDepth++
+      showGrid(next)
+      return
+    }
+    if (!helper.running) return
+    activationPending = true
+    overlayVisible = false
+    helper.write(JSON.stringify({
+      type: "click",
+      fallbackId: gridFallbackId,
+      x: next.x + next.width / 2,
+      y: next.y + next.height / 2
+    }) + "\n")
   }
 
   function open(payloadJson) {
@@ -143,6 +244,9 @@ Item {
     overlayVisible = false
     activationPending = false
     barActivations = []
+    fallbackWindows = []
+    baseTargets = []
+    gridMode = false
     targets.clear()
     typedPrefix = ""
     statusText = ""
@@ -186,12 +290,16 @@ Item {
     activeScreen = screenNamed(payload.monitor || "")
     targets.clear()
     barActivations = []
+    fallbackWindows = Array.isArray(payload.fallbackWindows)
+      ? payload.fallbackWindows : []
     var combined = []
     var rows = Array.isArray(payload.targets) ? payload.targets : []
     for (var index = 0; index < rows.length; index++) {
       var row = rows[index]
       combined.push({
         targetId: Number(row.id),
+        targetKind: "semantic",
+        gridIndex: -1,
         targetX: Number(row.x),
         targetY: Number(row.y),
         targetWidth: Number(row.width),
@@ -199,16 +307,24 @@ Item {
       })
     }
     combined = combined.concat(collectBarTargets())
+    for (var fallbackIndex = 0; fallbackIndex < fallbackWindows.length; fallbackIndex++) {
+      var fallback = fallbackWindows[fallbackIndex]
+      combined.push({
+        targetId: -100000 - fallbackIndex,
+        targetKind: "grid-start",
+        gridIndex: fallbackIndex,
+        targetX: Number(fallback.x) + Number(fallback.width) / 2,
+        targetY: Number(fallback.y) + Number(fallback.height) / 2,
+        targetWidth: 1,
+        targetHeight: 1
+      })
+    }
     combined.sort(function(left, right) {
       return Math.round(left.targetY / 8) - Math.round(right.targetY / 8)
         || left.targetX - right.targetX || left.targetY - right.targetY
     })
-    var labels = generateLabels(combined.length)
-    for (var targetIndex = 0; targetIndex < combined.length; targetIndex++) {
-      var target = combined[targetIndex]
-      target.label = labels[targetIndex]
-      targets.append(target)
-    }
+    baseTargets = combined.slice()
+    setTargetRows(combined, true)
     overlayVisible = true
     if (targets.count === 0) {
       statusText = "No accessible controls found on this screen"
@@ -244,13 +360,19 @@ Item {
   function updatePrefix(nextPrefix) {
     typedPrefix = nextPrefix
     var exactId = null
+    var exactKind = ""
+    var exactGridIndex = -1
     var remaining = 0
     for (var index = 0; index < targets.count; index++) {
       var row = targets.get(index)
       if (row.label.indexOf(typedPrefix) === 0) remaining++
-      if (row.label === typedPrefix) exactId = row.targetId
+      if (row.label === typedPrefix) {
+        exactId = row.targetId
+        exactKind = row.targetKind
+        exactGridIndex = row.gridIndex
+      }
     }
-    if (exactId !== null) activate(exactId)
+    if (exactId !== null) activate(exactId, exactKind, exactGridIndex)
     else if (remaining === 0) typedPrefix = ""
   }
 
@@ -261,13 +383,37 @@ Item {
   }
 
   function backspace() {
-    if (activationPending || statusText !== "" || typedPrefix.length === 0) return
-    updatePrefix(typedPrefix.substring(0, typedPrefix.length - 1))
+    if (activationPending || statusText !== "") return
+    if (typedPrefix.length > 0) {
+      updatePrefix(typedPrefix.substring(0, typedPrefix.length - 1))
+      return
+    }
+    if (!gridMode) return
+    if (gridDepth > 0 && gridHistory.length > 0) {
+      var history = gridHistory.slice()
+      var previous = history.pop()
+      gridHistory = history
+      gridDepth--
+      showGrid(previous)
+    } else {
+      gridMode = false
+      gridRect = null
+      gridFallbackId = -1
+      setTargetRows(baseTargets, true)
+    }
   }
 
-  function activate(targetId) {
+  function activate(targetId, targetKind, gridIndex) {
     if (activationPending) return
-    if (targetId < 0) {
+    if (targetKind === "grid-start") {
+      startGrid(gridIndex)
+      return
+    }
+    if (targetKind === "grid-cell") {
+      refineGrid(gridIndex)
+      return
+    }
+    if (targetKind === "bar") {
       var barTarget = barActivations[-targetId - 1]
       if (!barTarget || typeof barTarget.triggerPress !== "function") {
         showTransient("That bar control is no longer available")

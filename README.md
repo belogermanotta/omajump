@@ -5,9 +5,9 @@ type the home-row label shown on a control, and OmaJump invokes that control's
 accessibility action without moving the mouse.
 
 Version 0.1 targets every visible application window on the focused monitor's
-active workspace and supports primary activation, Backspace, and Escape. It
-does not take screenshots, connect to the network, create a virtual input
-device, or require root.
+active workspace and supports primary activation, a refined pointer-grid
+fallback, Backspace, and Escape. It does not take screenshots, run OCR, connect
+to the network, create a virtual input device, or require root.
 
 ## Requirements
 
@@ -59,6 +59,12 @@ Labels are prefix-free, so a complete label activates immediately. Targets are
 ordered from top to bottom and left to right; the earliest targets receive the
 shortest labels.
 
+If a window such as WezTerm exposes no actionable accessibility controls,
+OmaJump places one hint at its center. Choose it to enter a highlighted 3×3
+grid, then choose three home-row cells to refine the pointer location and send
+a left click. Backspace moves to the previous grid level. The pointer action is
+sent directly through Hyprland to the selected window.
+
 ## Update and remove
 
 ```bash
@@ -77,7 +83,8 @@ windows on the focused monitor and their Hyprland geometry. Accessible names
 remain in the helper and are neither sent to QML nor stored. Only anonymous
 rectangles, numeric IDs, and generated labels cross the local process pipe.
 Bar-widget geometry and activation stay inside the existing Omarchy Shell
-process.
+process. Pointer-grid activation sends only the chosen coordinate and target
+window to the local Hyprland compositor.
 
 ## Development
 

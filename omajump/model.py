@@ -62,6 +62,7 @@ class Client:
     focus_history_id: int = -1
     fullscreen: int = 0
     title: str = ""
+    address: str = ""
 
 
 @dataclass(slots=True)

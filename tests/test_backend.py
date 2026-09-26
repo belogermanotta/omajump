@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from omajump.backend import (
@@ -13,7 +14,7 @@ from omajump.backend import (
     choose_action,
     process_distance,
 )
-from omajump.model import Candidate, Monitor, Rect
+from omajump.model import Candidate, Client, Monitor, Rect
 
 
 class ActionSelectionTests(unittest.TestCase):
@@ -91,6 +92,42 @@ class ActivationTests(unittest.TestCase):
         with self.assertRaises(BackendError):
             session.activate(4)
         self.assertEqual(node.calls, 0)
+
+    def test_grid_click_is_scoped_to_fallback_window(self) -> None:
+        session = BackendSession()
+        monitor = Monitor("test", Rect(100, 50, 1000, 800), monitor_id=2)
+        client = Client(
+            42,
+            Rect(200, 100, 600, 500),
+            2,
+            address="0xabc123",
+        )
+        session.result = ScanResult(monitor, [], 1, False, [client])
+        with (
+            patch("omajump.backend.time.sleep"),
+            patch(
+                "omajump.backend.subprocess.run",
+                return_value=SimpleNamespace(stdout="ok\n"),
+            ) as run,
+        ):
+            response = session.click(0, 200, 150)
+        self.assertTrue(response["ok"])
+        self.assertEqual(run.call_count, 3)
+        commands = [call.args[0][-1] for call in run.call_args_list]
+        self.assertIn('window = "address:0xabc123"', commands[0])
+        self.assertIn("x = 300", commands[1])
+        self.assertIn("y = 200", commands[1])
+        self.assertIn('key = "mouse:272"', commands[2])
+
+    def test_grid_click_rejects_points_outside_window(self) -> None:
+        session = BackendSession()
+        monitor = Monitor("test", Rect(0, 0, 1000, 800), monitor_id=2)
+        client = Client(42, Rect(100, 100, 500, 400), 2, address="0xabc123")
+        session.result = ScanResult(monitor, [], 1, False, [client])
+        with patch("omajump.backend.subprocess.run") as run:
+            with self.assertRaises(BackendError):
+                session.click(0, 900, 700)
+        run.assert_not_called()
 
 
 class HyprlandGeometryTests(unittest.TestCase):
