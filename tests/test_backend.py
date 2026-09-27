@@ -7,9 +7,12 @@ from unittest.mock import patch
 from omajump.backend import (
     BackendError,
     BackendSession,
+    ParagraphTarget,
     ScanResult,
+    SearchTarget,
     ScrollTarget,
     _prime_accessibility,
+    _is_paragraph_like,
     _screen_geometry,
     _screens_geometry,
     _title_match_score,
@@ -42,6 +45,18 @@ class ActionSelectionTests(unittest.TestCase):
 
     def test_focusable_editor_uses_focus_fallback(self) -> None:
         self.assertEqual(choose_action("entry", [], {"focusable"}), (-1, "focus"))
+
+    def test_multiline_static_text_is_a_paragraph_but_short_labels_are_not(self) -> None:
+        self.assertTrue(
+            _is_paragraph_like(
+                "static",
+                "This is a complete block of accessible prose with several useful words.",
+                Rect(0, 0, 500, 40),
+            )
+        )
+        self.assertFalse(
+            _is_paragraph_like("static", "Open settings and preferences", Rect(0, 0, 300, 18))
+        )
 
 
 class _ActionNode:
@@ -152,6 +167,46 @@ class ActivationTests(unittest.TestCase):
         self.assertIn('mods = "SHIFT"', command)
         self.assertIn('key = "PAGE_DOWN"', command)
         self.assertIn('window = "address:0xabc123"', command)
+
+    def test_search_enter_clicks_match_center_in_exact_window(self) -> None:
+        session = BackendSession()
+        monitor = Monitor("test", Rect(100, 50, 1000, 800), monitor_id=2)
+        client = Client(42, Rect(200, 100, 600, 500), 2, address="0xabc123")
+        target = SearchTarget(
+            "Matching text", object(), client, monitor, Rect(200, 150, 80, 20)
+        )
+        session.result = ScanResult(
+            monitor, [], 1, False, monitors=[monitor], search_targets=[target]
+        )
+        with (
+            patch("omajump.backend.time.sleep"),
+            patch(
+                "omajump.backend.subprocess.run",
+                return_value=SimpleNamespace(stdout="ok\n"),
+            ) as run,
+        ):
+            response = session.search_click(0)
+        self.assertTrue(response["ok"])
+        commands = [call.args[0][-1] for call in run.call_args_list]
+        self.assertIn("x = 340", commands[1])
+        self.assertIn("y = 210", commands[1])
+        self.assertIn('window = "address:0xabc123"', commands[2])
+
+    def test_selected_paragraph_is_copied_verbatim(self) -> None:
+        session = BackendSession()
+        monitor = Monitor("test", Rect(0, 0, 1000, 800), monitor_id=2)
+        client = Client(42, Rect(0, 0, 500, 400), 2)
+        target = ParagraphTarget(
+            "First line\nSecond line", object(), client, monitor, Rect(2, 2, 100, 40)
+        )
+        session.result = ScanResult(
+            monitor, [], 1, False, monitors=[monitor], paragraph_targets=[target]
+        )
+        with patch("omajump.backend.subprocess.run") as run:
+            response = session.copy_paragraph(0)
+        self.assertTrue(response["ok"])
+        self.assertEqual(run.call_args.args[0], ["wl-copy"])
+        self.assertEqual(run.call_args.kwargs["input"], "First line\nSecond line")
 
 
 class HyprlandGeometryTests(unittest.TestCase):

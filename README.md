@@ -4,9 +4,9 @@ OmaJump adds Homerow-style keyboard hints to Omarchy. Summon the overlay,
 type the home-row label shown on a control, and OmaJump invokes that control's
 accessibility action without moving the mouse.
 
-Version 0.2 targets every visible application window on every monitor's active
+Version 0.3 targets every visible application window on every monitor's active
 workspace. It supports semantic activation, text highlighting, scroll-region
-selection, the Omarchy toolbar, and a refined pointer-grid fallback. It does
+selection, paragraph copying, the Omarchy toolbar, and a refined pointer-grid fallback. It does
 not take screenshots, run OCR, connect to the network, create a virtual input
 device, or require root.
 
@@ -38,6 +38,7 @@ Add the recommended binding to `~/.config/hypr/bindings.lua`:
 o.bind("SUPER + ALT + CTRL + SPACE", "OmaJump", "omarchy-shell shell toggle omajump '{}'")
 o.bind("SUPER + ALT + CTRL + SLASH", "OmaJump text search", "omarchy-shell shell summon omajump '{\"mode\":\"search\"}'")
 o.bind("SUPER + ALT + CTRL + J", "OmaJump scroll regions", "omarchy-shell shell summon omajump '{\"mode\":\"scroll\"}'")
+o.bind("SUPER + ALT + CTRL + P", "OmaJump copy paragraph", "omarchy-shell shell summon omajump '{\"mode\":\"paragraph\"}'")
 ```
 
 Check `omarchy menu keybindings --print` first and choose another key if
@@ -53,8 +54,9 @@ OmaJump deliberately does not edit your bindings during installation.
 
 ## Use
 
-Press `SUPER + ALT + CTRL + SPACE`, then type a visible hint using
-`a s d f g h j k l`. Hints appear simultaneously on every connected screen;
+Press `SUPER + ALT + CTRL + SPACE`, then type a visible alphabetical hint.
+Hints begin with `a`, `b`, `c`, and continue through the alphabet before
+expanding into prefix-free multi-letter labels. They appear simultaneously on every connected screen;
 the screen that was focused when OmaJump opened captures the keyboard. For a
 multi-key hint, characters already typed turn grey. Use Backspace to correct a
 partial hint or Escape to close the overlay.
@@ -72,12 +74,16 @@ sent directly through Hyprland to the selected window.
 Press `SUPER + ALT + CTRL + /` for text-search mode. Type at least three
 characters; all matching accessible text is highlighted across every active
 screen. Continue typing to narrow the highlights, Backspace to widen them, or
-Escape to close.
+press Enter to click the blue-outlined best match. Escape closes the overlay.
 
 Press `SUPER + ALT + CTRL + J` to label all accessible scroll regions. Choose
 a region, then use Up/Down or `i`/`k` to scroll that exact window. Backspace
 returns to region selection. Apps with sparse accessibility data, including
 terminals such as WezTerm, receive a whole-window scroll region.
+
+Press `SUPER + ALT + CTRL + P` to label accessible paragraphs across every
+screen. Choose a paragraph to copy its complete accessible text to the Wayland
+clipboard. Hint badges use a 70% opaque black background for reliable contrast.
 
 ## Update and remove
 
@@ -95,7 +101,8 @@ Omarchy plugins run as unsandboxed code inside the shell, so review third-party
 plugins before enabling them. OmaJump's helper reads the AT-SPI trees of visible
 windows on all active monitors and their Hyprland geometry. Accessible names
 cross the local process pipe only while text-search mode is open and are never
-stored. Normal hint and scroll modes expose only rectangles and numeric IDs.
+stored. Paragraph text remains in the helper until the selected paragraph is
+passed to `wl-copy`. Normal hint and scroll modes expose only rectangles and numeric IDs.
 Bar-widget geometry and activation stay inside the existing Omarchy Shell
 process. Pointer-grid activation sends only the chosen coordinate and target
 window to the local Hyprland compositor.
@@ -116,6 +123,7 @@ Run read-only scans of all active screens without invoking any action:
 python scripts/omajump_backend.py --probe | python -m json.tool
 python scripts/omajump_backend.py --probe --mode search | python -m json.tool
 python scripts/omajump_backend.py --probe --mode scroll | python -m json.tool
+python scripts/omajump_backend.py --probe --mode paragraph | python -m json.tool
 ```
 
 Run the standalone overlay fixture (Escape closes it):

@@ -29,7 +29,9 @@ Item {
   property int gridDepth: 0
   property bool gridMode: false
   property int selectedScrollId: -1
-  readonly property string alphabet: "asdfghjkl"
+  readonly property string alphabet: "abcdefghijklmnopqrstuvwxyz"
+  readonly property int searchMatchCount: countSearchMatches(typedPrefix, targets.count)
+  readonly property int searchSelectedId: bestSearchTargetId(typedPrefix, targets.count)
 
   function pluginId() {
     return root.manifest && root.manifest.id ? root.manifest.id : "omajump"
@@ -187,7 +189,7 @@ Item {
     resetState()
     var payload = {}
     try { payload = JSON.parse(String(payloadJson || "{}")) } catch (error) { payload = {} }
-    interactionMode = ["hints", "search", "scroll"].indexOf(String(payload.mode || "hints")) >= 0
+    interactionMode = ["hints", "search", "scroll", "paragraph"].indexOf(String(payload.mode || "hints")) >= 0
       ? String(payload.mode || "hints") : "hints"
     scanning = true
     helper.command = ["python3", helperPath(), "--mode", interactionMode]
@@ -231,13 +233,13 @@ Item {
       for (var searchIndex = 0; searchIndex < searchRows.length; searchIndex++) {
         var search = searchRows[searchIndex]
         combined.push({
-          targetId: searchIndex, targetKind: "search", gridIndex: -1, label: "",
+          targetId: Number(search.id), targetKind: "search", gridIndex: -1, label: "",
           targetMonitor: String(search.monitor || ""), searchText: String(search.text || ""),
           targetX: Number(search.x), targetY: Number(search.y),
           targetWidth: Number(search.width), targetHeight: Number(search.height)
         })
       }
-      baseTargets = combined.slice(); setTargetRows(combined, false)
+      sortSpatially(combined); baseTargets = combined.slice(); setTargetRows(combined, false)
     } else if (interactionMode === "scroll") {
       var scrollRows = Array.isArray(payload.scrollTargets) ? payload.scrollTargets : []
       for (var scrollIndex = 0; scrollIndex < scrollRows.length; scrollIndex++) {
@@ -247,6 +249,18 @@ Item {
           targetMonitor: String(scroll.monitor || ""), searchText: "",
           targetX: Number(scroll.x), targetY: Number(scroll.y),
           targetWidth: Number(scroll.width), targetHeight: Number(scroll.height)
+        })
+      }
+      sortSpatially(combined); baseTargets = combined.slice(); setTargetRows(combined, true)
+    } else if (interactionMode === "paragraph") {
+      var paragraphRows = Array.isArray(payload.paragraphTargets) ? payload.paragraphTargets : []
+      for (var paragraphIndex = 0; paragraphIndex < paragraphRows.length; paragraphIndex++) {
+        var paragraph = paragraphRows[paragraphIndex]
+        combined.push({
+          targetId: Number(paragraph.id), targetKind: "paragraph", gridIndex: -1,
+          targetMonitor: String(paragraph.monitor || ""), searchText: "",
+          targetX: Number(paragraph.x), targetY: Number(paragraph.y),
+          targetWidth: Number(paragraph.width), targetHeight: Number(paragraph.height)
         })
       }
       sortSpatially(combined); baseTargets = combined.slice(); setTargetRows(combined, true)
@@ -278,6 +292,7 @@ Item {
     if (targets.count === 0) {
       statusText = interactionMode === "search" ? "No readable text found on the active screens"
         : interactionMode === "scroll" ? "No scrollable regions found on the active screens"
+        : interactionMode === "paragraph" ? "No accessible paragraphs found on the active screens"
         : "No controls found on the active screens"
       dismissTimer.restart()
     } else statusText = ""
@@ -292,6 +307,7 @@ Item {
     if (payload.type === "context") handleContext(payload)
     else if (payload.type === "targets") handleTargets(payload)
     else if (payload.type === "activated") root.dismiss()
+    else if (payload.type === "copied") root.showTransient("Paragraph copied to clipboard")
     else if (payload.type === "scrolled") activationPending = false
     else if (payload.type === "error") {
       activationPending = false
@@ -325,6 +341,42 @@ Item {
       return
     }
     if (alphabet.indexOf(character) !== -1) updatePrefix(typedPrefix + character)
+  }
+
+  function countSearchMatches(query, modelCount) {
+    if (interactionMode !== "search" || query.length < 3) return 0
+    var normalized = query.toLowerCase(), count = 0
+    for (var index = 0; index < modelCount; index++) {
+      var row = targets.get(index)
+      if (row.targetKind === "search"
+          && row.searchText.toLowerCase().indexOf(normalized) !== -1) count++
+    }
+    return count
+  }
+
+  function bestSearchTargetId(query, modelCount) {
+    if (interactionMode !== "search" || query.length < 3) return -1
+    var normalized = query.toLowerCase(), chosenId = -1, bestScore = 99
+    for (var index = 0; index < modelCount; index++) {
+      var row = targets.get(index)
+      if (row.targetKind !== "search") continue
+      var candidate = row.searchText.toLowerCase()
+      if (candidate.indexOf(normalized) === -1) continue
+      var score = candidate === normalized ? 0
+        : (candidate.indexOf(normalized) === 0 ? 1 : 2)
+      if (score < bestScore) { bestScore = score; chosenId = Number(row.targetId) }
+    }
+    return chosenId
+  }
+
+  function confirm() {
+    if (interactionMode !== "search" || activationPending
+        || statusText !== "" || typedPrefix.length < 3) return
+    var chosenId = searchSelectedId
+    if (chosenId < 0 || !helper.running) return
+    activationPending = true
+    overlayVisible = false
+    helper.write(JSON.stringify({ type: "search-click", id: chosenId }) + "\n")
   }
 
   function backspace() {
@@ -367,6 +419,12 @@ Item {
     if (targetKind === "grid-start") { startGrid(gridIndex); return }
     if (targetKind === "grid-cell") { refineGrid(gridIndex); return }
     if (targetKind === "scroll") { selectScroll(targetId); return }
+    if (targetKind === "paragraph") {
+      if (!helper.running) return
+      activationPending = true; statusText = "Copying paragraph…"
+      helper.write(JSON.stringify({ type: "copy", id: targetId }) + "\n")
+      return
+    }
     if (targetKind === "bar") {
       var barTarget = barActivations[-targetId - 1]
       if (!barTarget || typeof barTarget.triggerPress !== "function") {
@@ -418,8 +476,10 @@ Item {
         statusText: root.statusText
         interactionMode: root.interactionMode
         scrollSelected: root.selectedScrollId >= 0
+        searchMatchCount: root.searchMatchCount
+        searchSelectedId: root.searchSelectedId
         loading: root.scanning
-        badgeBackground: Color.menu.selectedBackground
+        badgeBackground: Qt.rgba(0, 0, 0, 0.7)
         badgeForeground: Color.menu.selectedText
         matchedForeground: Qt.darker(Color.menu.selectedText, 1.8)
         badgeBorder: Color.menu.border
@@ -432,6 +492,7 @@ Item {
         onCharacterTyped: function(character) { root.typeCharacter(character) }
         onBackspaceRequested: root.backspace()
         onCancelRequested: root.dismiss()
+        onConfirmRequested: root.confirm()
         onScrollRequested: function(direction) { root.requestScroll(direction) }
       }
     }

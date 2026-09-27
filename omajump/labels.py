@@ -1,9 +1,9 @@
-"""Prefix-free home-row label generation."""
+"""Prefix-free alphabetical hint generation."""
 
 from __future__ import annotations
 
 
-DEFAULT_ALPHABET = "asdfghjkl"
+DEFAULT_ALPHABET = "abcdefghijklmnopqrstuvwxyz"
 
 
 def generate_labels(count: int, alphabet: str = DEFAULT_ALPHABET) -> list[str]:

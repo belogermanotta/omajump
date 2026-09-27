@@ -14,6 +14,8 @@ PanelWindow {
   property string statusText: ""
   property string interactionMode: "hints"
   property bool scrollSelected: false
+  property int searchMatchCount: 0
+  property int searchSelectedId: -1
   property bool loading: false
 
   property color badgeBackground: "#e6d85c"
@@ -29,6 +31,7 @@ PanelWindow {
   signal characterTyped(string character)
   signal backspaceRequested()
   signal cancelRequested()
+  signal confirmRequested()
   signal scrollRequested(int direction)
 
   screen: root.activeScreen
@@ -62,6 +65,8 @@ PanelWindow {
         root.cancelRequested(); event.accepted = true
       } else if (event.key === Qt.Key_Backspace) {
         root.backspaceRequested(); event.accepted = true
+      } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+        root.confirmRequested(); event.accepted = true
       } else if (root.interactionMode === "scroll" && root.scrollSelected
           && (event.key === Qt.Key_Up || event.key === Qt.Key_Down)) {
         root.scrollRequested(event.key === Qt.Key_Up ? -1 : 1); event.accepted = true
@@ -77,6 +82,7 @@ PanelWindow {
     delegate: Item {
       id: targetItem
       required property string label
+      required property int targetId
       required property string targetKind
       required property string targetMonitor
       required property string searchText
@@ -88,27 +94,46 @@ PanelWindow {
       readonly property bool isSearch: targetKind === "search"
       readonly property bool isRegion: targetKind === "scroll" || targetKind === "scroll-selected"
       readonly property bool isGrid: targetKind === "grid-cell"
+      readonly property bool isParagraph: targetKind === "paragraph"
       readonly property bool queryMatches: root.typedPrefix.length >= 3
         && searchText.toLowerCase().indexOf(root.typedPrefix.toLowerCase()) !== -1
+      readonly property bool chosenSearch: isSearch && targetId === root.searchSelectedId
       visible: root.opened && !root.loading && root.statusText === ""
         && targetMonitor === root.screenName
-        && (isSearch ? queryMatches : (isRegion || label.indexOf(root.typedPrefix) === 0))
+        && (isSearch ? queryMatches
+          : (isRegion || isParagraph || label.indexOf(root.typedPrefix) === 0))
       anchors.fill: parent
 
       Rectangle {
-        visible: targetItem.isSearch || targetItem.isRegion || targetItem.isGrid
+        id: targetHighlight
+        visible: targetItem.isSearch || targetItem.isRegion
+          || targetItem.isGrid || targetItem.isParagraph
         x: Math.round(targetItem.targetX)
         y: Math.round(targetItem.targetY)
         width: Math.max(1, Math.round(targetItem.targetWidth))
         height: Math.max(1, Math.round(targetItem.targetHeight))
         radius: root.cornerRadius
-        color: targetItem.isSearch ? Qt.rgba(1.0, 0.85, 0.15, 0.24)
+        color: targetItem.isSearch ? Qt.rgba(0, 0, 0, 0.7)
           : targetItem.targetKind === "scroll-selected" ? Qt.rgba(0.25, 0.75, 1.0, 0.24)
+          : targetItem.isParagraph ? Qt.rgba(0, 0, 0, 0.15)
           : "transparent"
-        border.width: targetItem.targetKind === "scroll-selected" ? 3 : 2
-        border.color: targetItem.isSearch ? root.badgeBackground
+        border.width: targetItem.targetKind === "scroll-selected" || targetItem.chosenSearch ? 3 : 2
+        border.color: targetItem.chosenSearch ? "#61c8ff"
+          : targetItem.isSearch ? root.badgeBorder
           : targetItem.targetKind === "scroll-selected" ? "#61c8ff" : root.badgeBorder
-        opacity: targetItem.isGrid ? 0.55 : 0.9
+        opacity: targetItem.isGrid ? 0.55 : 1.0
+
+        Text {
+          visible: targetItem.isSearch
+          anchors.fill: parent
+          anchors.margins: 4
+          text: targetItem.searchText
+          color: "white"
+          font.family: root.fontFamily
+          font.pixelSize: root.badgeFontSize
+          elide: Text.ElideRight
+          verticalAlignment: Text.AlignVCenter
+        }
       }
 
       Rectangle {
@@ -175,7 +200,8 @@ PanelWindow {
 
   Rectangle {
     visible: root.opened && root.captureKeyboard && !root.loading && root.statusText === ""
-      && (root.interactionMode === "search" || root.interactionMode === "scroll")
+      && (root.interactionMode === "search" || root.interactionMode === "scroll"
+        || root.interactionMode === "paragraph")
     anchors { top: parent.top; horizontalCenter: parent.horizontalCenter; topMargin: 18 }
     width: Math.min(root.width - 32, promptLabel.implicitWidth + 28)
     height: promptLabel.implicitHeight + 18
@@ -190,7 +216,9 @@ PanelWindow {
       text: root.interactionMode === "search"
         ? (root.typedPrefix.length < 3
           ? "Search: " + root.typedPrefix + "  (type at least 3 characters)"
-          : "Search: " + root.typedPrefix)
+          : "Search: " + root.typedPrefix + "  · " + root.searchMatchCount
+            + " matches · Enter clicks the blue outline")
+        : root.interactionMode === "paragraph" ? "Choose a paragraph to copy"
         : (root.scrollSelected
           ? "Scroll with ↑/↓ or i/k · Backspace chooses another region"
           : "Choose a scrollable region")

@@ -13,7 +13,7 @@ class LabelTests(unittest.TestCase):
         self.assertEqual(generate_labels(len(DEFAULT_ALPHABET)), list(DEFAULT_ALPHABET))
 
     def test_expansion_remains_prefix_free(self) -> None:
-        for count in (10, 17, 18, 81, 250):
+        for count in (27, 51, 52, 676, 2500):
             labels = generate_labels(count)
             self.assertEqual(len(labels), count)
             self.assertEqual(len(set(labels)), count)
@@ -21,9 +21,9 @@ class LabelTests(unittest.TestCase):
             self.assertLessEqual(max(map(len, labels)), 3)
 
     def test_earliest_targets_keep_short_labels(self) -> None:
-        labels = generate_labels(10)
-        self.assertEqual(labels[:8], list(DEFAULT_ALPHABET[:-1]))
-        self.assertTrue(all(len(label) == 2 for label in labels[8:]))
+        labels = generate_labels(27)
+        self.assertEqual(labels[:25], list(DEFAULT_ALPHABET[:-1]))
+        self.assertTrue(all(len(label) == 2 for label in labels[25:]))
 
     def test_invalid_alphabet_is_rejected(self) -> None:
         with self.assertRaises(ValueError):

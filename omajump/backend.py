@@ -423,7 +423,7 @@ def _action_names(node: Any) -> list[str]:
         return []
 
 
-def _node_text(node: Any) -> str:
+def _node_text(node: Any, limit: int = 240) -> str:
     """Return a compact accessible label suitable for live text search."""
 
     values: list[str] = []
@@ -434,10 +434,12 @@ def _node_text(node: Any) -> str:
     if not any(value.strip() for value in values):
         try:
             text_iface = node.get_text_iface()
-            values.append(str(text_iface.get_text(0, min(240, text_iface.get_character_count())) or ""))
+            values.append(
+                str(text_iface.get_text(0, min(limit, text_iface.get_character_count())) or "")
+            )
         except Exception:
             pass
-    return " ".join(" ".join(values).split())[:240]
+    return " ".join(" ".join(values).split())[:limit]
 
 
 def _is_scrollable(node: Any, role: str) -> bool:
@@ -454,6 +456,19 @@ def _is_scrollable(node: Any, role: str) -> bool:
         return False
 
 
+def _is_paragraph_like(role: str, text: str, rect: Rect) -> bool:
+    """Recognize prose blocks in Chromium trees that expose them as static text."""
+
+    if role == "paragraph":
+        return bool(text.strip())
+    if role not in {"section", "static", "text"}:
+        return False
+    words = text.split()
+    if len(words) < 7 or len(text) < 40 or text.endswith("…"):
+        return False
+    return rect.height >= 24 or len(text) >= 100
+
+
 @dataclass(slots=True)
 class FallbackTarget:
     client: Client
@@ -463,6 +478,8 @@ class FallbackTarget:
 @dataclass(slots=True)
 class SearchTarget:
     text: str
+    node: object
+    client: Client
     monitor: Monitor
     rect: Rect
 
@@ -470,6 +487,15 @@ class SearchTarget:
 @dataclass(slots=True)
 class ScrollTarget:
     node: object | None
+    client: Client
+    monitor: Monitor
+    rect: Rect
+
+
+@dataclass(slots=True)
+class ParagraphTarget:
+    text: str
+    node: object
     client: Client
     monitor: Monitor
     rect: Rect
@@ -486,6 +512,7 @@ class ScanResult:
     fallback_targets: list[FallbackTarget] = field(default_factory=list)
     search_targets: list[SearchTarget] = field(default_factory=list)
     scroll_targets: list[ScrollTarget] = field(default_factory=list)
+    paragraph_targets: list[ParagraphTarget] = field(default_factory=list)
     input_monitor: str = ""
 
 
@@ -516,7 +543,7 @@ class BackendSession:
         context_callback: Callable[[dict[str, Any]], None] | None = None,
         mode: str = "hints",
     ) -> dict[str, Any]:
-        if mode not in {"hints", "search", "scroll"}:
+        if mode not in {"hints", "search", "scroll", "paragraph"}:
             raise BackendError("invalid-mode", f"Unknown OmaJump mode: {mode}")
         Atspi = self._load_atspi()
         contexts, input_monitor = _screens_geometry()
@@ -539,6 +566,7 @@ class BackendSession:
         candidates: list[Candidate] = []
         search_targets: list[SearchTarget] = []
         scroll_targets: list[ScrollTarget] = []
+        paragraph_targets: list[ParagraphTarget] = []
         fallback_targets: list[FallbackTarget] = []
         nodes_scanned = 0
         truncated = False
@@ -613,7 +641,26 @@ class BackendSession:
                             text = _node_text(node)
                             if text:
                                 search_targets.append(
-                                    SearchTarget(text, current_monitor, mapper.overlay_rect(visible))
+                                    SearchTarget(
+                                        text, node, client, current_monitor,
+                                        mapper.overlay_rect(visible),
+                                    )
+                                )
+                    elif mode == "paragraph":
+                        if (
+                            visible is not None
+                            and role in {"paragraph", "section", "static", "text"}
+                            and {"showing", "visible"}.issubset(states)
+                            and visible.width >= 2
+                            and visible.height >= 2
+                        ):
+                            text = _node_text(node, limit=20_000)
+                            if _is_paragraph_like(role, text, mapper.overlay_rect(visible)):
+                                paragraph_targets.append(
+                                    ParagraphTarget(
+                                        text, node, client, current_monitor,
+                                        mapper.overlay_rect(visible),
+                                    )
                                 )
                     elif (
                         visible is not None
@@ -704,6 +751,21 @@ class BackendSession:
                 search_keys.add(key)
                 unique_search.append(item)
         search_targets = unique_search[:1500]
+        unique_paragraphs: list[ParagraphTarget] = []
+        paragraph_keys: set[tuple[Any, ...]] = set()
+        for item in paragraph_targets:
+            key = (
+                item.monitor.name,
+                item.text.casefold(),
+                round(item.rect.x),
+                round(item.rect.y),
+                round(item.rect.width),
+                round(item.rect.height),
+            )
+            if key not in paragraph_keys:
+                paragraph_keys.add(key)
+                unique_paragraphs.append(item)
+        paragraph_targets = unique_paragraphs[: self.max_targets]
         if len(candidates) > self.max_targets:
             candidates = candidates[: self.max_targets]
             truncated = True
@@ -721,6 +783,7 @@ class BackendSession:
             fallback_targets,
             search_targets,
             scroll_targets,
+            paragraph_targets,
             input_monitor,
         )
         labels = generate_labels(len(candidates))
@@ -755,6 +818,7 @@ class BackendSession:
             ],
             "searchTargets": [
                 {
+                    "id": index,
                     "text": target.text,
                     "monitor": target.monitor.name,
                     "x": round(target.rect.x, 2),
@@ -762,7 +826,7 @@ class BackendSession:
                     "width": round(target.rect.width, 2),
                     "height": round(target.rect.height, 2),
                 }
-                for target in search_targets
+                for index, target in enumerate(search_targets)
             ],
             "scrollTargets": [
                 {
@@ -775,6 +839,17 @@ class BackendSession:
                 }
                 for index, target in enumerate(scroll_targets)
             ],
+            "paragraphTargets": [
+                {
+                    "id": index,
+                    "monitor": target.monitor.name,
+                    "x": round(target.rect.x, 2),
+                    "y": round(target.rect.y, 2),
+                    "width": round(target.rect.width, 2),
+                    "height": round(target.rect.height, 2),
+                }
+                for index, target in enumerate(paragraph_targets)
+            ],
             "meta": {
                 "nodesScanned": nodes_scanned,
                 "truncated": truncated,
@@ -784,22 +859,11 @@ class BackendSession:
             },
         }
 
-    def click(self, fallback_id: int, x: float, y: float) -> dict[str, Any]:
-        if self.result is None:
-            raise BackendError("not-scanned", "No accessibility scan is active")
-        if fallback_id < 0 or fallback_id >= len(self.result.fallback_clients):
-            raise BackendError("invalid-target", "The selected fallback window no longer exists")
+    def _pointer_click(
+        self, client: Client, monitor: Monitor, x: float, y: float
+    ) -> None:
         if not math.isfinite(x) or not math.isfinite(y):
             raise BackendError("invalid-target", "The selected point is invalid")
-
-        if self.result.fallback_targets:
-            fallback = self.result.fallback_targets[fallback_id]
-            client = fallback.client
-            monitor = fallback.monitor
-        else:
-            # Preserve the small direct-construction API used by integrations.
-            client = self.result.fallback_clients[fallback_id]
-            monitor = self.result.monitor
         global_x = monitor.rect.x + x
         global_y = monitor.rect.y + y
         point = Rect(global_x, global_y, 1, 1)
@@ -837,7 +901,48 @@ class BackendSession:
             raise BackendError(
                 "activation-failed", f"Could not send the pointer action: {error}"
             ) from error
+
+    def click(self, fallback_id: int, x: float, y: float) -> dict[str, Any]:
+        if self.result is None:
+            raise BackendError("not-scanned", "No accessibility scan is active")
+        if fallback_id < 0 or fallback_id >= len(self.result.fallback_clients):
+            raise BackendError("invalid-target", "The selected fallback window no longer exists")
+
+        if self.result.fallback_targets:
+            fallback = self.result.fallback_targets[fallback_id]
+            client = fallback.client
+            monitor = fallback.monitor
+        else:
+            # Preserve the small direct-construction API used by integrations.
+            client = self.result.fallback_clients[fallback_id]
+            monitor = self.result.monitor
+        self._pointer_click(client, monitor, x, y)
         return {"type": "activated", "id": fallback_id, "ok": True}
+
+    def search_click(self, target_id: int) -> dict[str, Any]:
+        if self.result is None:
+            raise BackendError("not-scanned", "No accessibility scan is active")
+        if target_id < 0 or target_id >= len(self.result.search_targets):
+            raise BackendError("invalid-target", "The selected text no longer exists")
+        target = self.result.search_targets[target_id]
+        x, y = target.rect.center
+        self._pointer_click(target.client, target.monitor, x, y)
+        return {"type": "activated", "id": target_id, "ok": True}
+
+    def copy_paragraph(self, target_id: int) -> dict[str, Any]:
+        if self.result is None:
+            raise BackendError("not-scanned", "No accessibility scan is active")
+        if target_id < 0 or target_id >= len(self.result.paragraph_targets):
+            raise BackendError("invalid-target", "The selected paragraph no longer exists")
+        text = self.result.paragraph_targets[target_id].text
+        try:
+            subprocess.run(
+                ["wl-copy"], input=text, check=True, text=True,
+                capture_output=True, timeout=2.0,
+            )
+        except (FileNotFoundError, subprocess.SubprocessError) as error:
+            raise BackendError("copy-failed", f"Could not copy the paragraph: {error}") from error
+        return {"type": "copied", "id": target_id, "ok": True}
 
     def scroll(self, target_id: int, direction: int) -> dict[str, Any]:
         if self.result is None:
@@ -939,6 +1044,10 @@ def run(probe: bool = False, mode: str = "hints") -> int:
                         float(command.get("y", float("nan"))),
                     )
                 )
+            elif command_type == "search-click":
+                _emit(session.search_click(int(command.get("id", -1))))
+            elif command_type == "copy":
+                _emit(session.copy_paragraph(int(command.get("id", -1))))
             elif command_type == "scroll":
                 _emit(
                     session.scroll(
@@ -959,8 +1068,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="OmaJump accessibility backend")
     parser.add_argument("--probe", action="store_true", help="scan once without accepting actions")
     parser.add_argument(
-        "--mode", choices=("hints", "search", "scroll"), default="hints",
-        help="choose controls, text search, or scroll-region discovery",
+        "--mode", choices=("hints", "search", "scroll", "paragraph"), default="hints",
+        help="choose controls, text search, scroll regions, or paragraph copying",
     )
     args = parser.parse_args(argv)
     return run(probe=args.probe, mode=args.mode)

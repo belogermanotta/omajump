@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "id": "omajump",
   "name": "OmaJump",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "author": "OmaJump contributors",
   "license": "MIT",
-  "description": "Navigate, search, and scroll every screen from the keyboard",
+  "description": "Navigate, search, scroll, and copy text across every screen",
   "kinds": [
     "overlay"
   ],
