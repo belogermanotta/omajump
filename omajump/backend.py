@@ -130,6 +130,44 @@ def _json_command(*args: str) -> Any:
         raise BackendError("hyprland-unavailable", f"Could not query Hyprland: {error}") from error
 
 
+def _omajump_layers_visible(layers: Any) -> bool:
+    if not isinstance(layers, dict):
+        return False
+    for monitor in layers.values():
+        if not isinstance(monitor, dict):
+            continue
+        levels = monitor.get("levels", {})
+        if not isinstance(levels, dict):
+            continue
+        for surfaces in levels.values():
+            if not isinstance(surfaces, list):
+                continue
+            if any(
+                isinstance(surface, dict)
+                and str(surface.get("namespace", "")).startswith("omajump-")
+                for surface in surfaces
+            ):
+                return True
+    return False
+
+
+def _wait_for_overlay_release(timeout: float = 0.75) -> None:
+    """Wait until Hyprland has unmapped OmaJump before sending a pointer event."""
+
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            if not _omajump_layers_visible(_json_command("hyprctl", "-j", "layers")):
+                break
+        except BackendError:
+            break
+        if time.monotonic() >= deadline:
+            break
+        time.sleep(0.025)
+    # Allow normal pointer focus to settle after the final layer disappears.
+    time.sleep(0.04)
+
+
 def _screens_geometry() -> tuple[list[tuple[list[Client], Monitor]], str]:
     """Return visible clients for every monitor's active workspace."""
 
@@ -884,9 +922,9 @@ class BackendSession:
         else:
             selector = f"pid:{client.pid}"
 
-        # QML hides the exclusive overlay before sending this command. Give
-        # the compositor a moment to restore normal keyboard/pointer focus.
-        time.sleep(0.12)
+        # QML hides the exclusive overlay before sending this command. Wait
+        # for Hyprland to confirm that its surfaces are actually unmapped.
+        _wait_for_overlay_release()
         commands = (
             f'hl.dsp.focus({{ window = "{selector}" }})',
             f"hl.dsp.cursor.move({{ x = {round(global_x)}, y = {round(global_y)} }})",

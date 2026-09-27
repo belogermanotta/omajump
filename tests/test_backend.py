@@ -12,6 +12,7 @@ from omajump.backend import (
     SearchTarget,
     ScrollTarget,
     _prime_accessibility,
+    _omajump_layers_visible,
     _is_paragraph_like,
     _screen_geometry,
     _screens_geometry,
@@ -68,6 +69,19 @@ class ActionSelectionTests(unittest.TestCase):
         )
 
 
+class OverlayReleaseTests(unittest.TestCase):
+    def test_detects_omajump_layer_on_any_monitor(self) -> None:
+        layers = {
+            "DP-2": {"levels": {"3": [{"namespace": "omajump-DP-2"}]}},
+            "HDMI-A-2": {"levels": {"3": [{"namespace": "notifications"}]}},
+        }
+        self.assertTrue(_omajump_layers_visible(layers))
+
+    def test_ignores_unrelated_layers(self) -> None:
+        layers = {"DP-2": {"levels": {"3": [{"namespace": "notifications"}]}}}
+        self.assertFalse(_omajump_layers_visible(layers))
+
+
 class _ActionNode:
     def __init__(self, result: bool = True) -> None:
         self.calls = 0
@@ -122,7 +136,7 @@ class ActivationTests(unittest.TestCase):
         session = BackendSession()
         session.result = ScanResult(monitor, [candidate], 1, False)
         with (
-            patch("omajump.backend.time.sleep"),
+            patch("omajump.backend._wait_for_overlay_release"),
             patch(
                 "omajump.backend.subprocess.run",
                 return_value=SimpleNamespace(stdout="ok\n"),
@@ -154,7 +168,7 @@ class ActivationTests(unittest.TestCase):
         )
         session.result = ScanResult(monitor, [], 1, False, [client])
         with (
-            patch("omajump.backend.time.sleep"),
+            patch("omajump.backend._wait_for_overlay_release"),
             patch(
                 "omajump.backend.subprocess.run",
                 return_value=SimpleNamespace(stdout="ok\n"),
@@ -212,7 +226,7 @@ class ActivationTests(unittest.TestCase):
             monitor, [], 1, False, monitors=[monitor], search_targets=[target]
         )
         with (
-            patch("omajump.backend.time.sleep"),
+            patch("omajump.backend._wait_for_overlay_release"),
             patch(
                 "omajump.backend.subprocess.run",
                 return_value=SimpleNamespace(stdout="ok\n"),
