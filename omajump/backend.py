@@ -98,7 +98,7 @@ class BackendError(RuntimeError):
 
 
 def choose_action(role: str, actions: Iterable[str], states: set[str]) -> tuple[int, str] | None:
-    """Select a direct primary action, or focus for an editable control."""
+    """Select a direct action, pointer fallback, or editable-control focus."""
 
     if role in STRUCTURAL_ROLES:
         return None
@@ -109,6 +109,13 @@ def choose_action(role: str, actions: Iterable[str], states: set[str]) -> tuple[
             continue
         if wanted in EXPLICIT_ACTIONS or role in DEFAULT_ACTION_ROLES:
             return normalized.index(wanted), wanted
+
+    # Chromium-family browser chrome (including Vivaldi) commonly exposes
+    # tabs with only "clickAncestor". Calling that action is noisy and often
+    # reports success without changing tabs, so click the semantic tab bounds
+    # through Hyprland instead. Direct AT-SPI actions above remain preferred.
+    if role == "page tab":
+        return -2, "pointer"
 
     if role in EDITABLE_ROLES and "focusable" in states:
         return -1, "focus"
@@ -628,6 +635,8 @@ class BackendSession:
                                     action_index=action_index,
                                     action_name=action_name,
                                     monitor_name=current_monitor.name,
+                                    client=client,
+                                    monitor=current_monitor,
                                 )
                             )
                     elif mode == "search":
@@ -998,10 +1007,21 @@ class BackendSession:
 
         candidate = self.result.candidates[target_id]
         try:
-            if candidate.action_index >= 0:
+            if candidate.action_name == "pointer":
+                if candidate.client is None or candidate.monitor is None:
+                    raise BackendError(
+                        "activation-failed", "The selected tab is missing window geometry"
+                    )
+                self._pointer_click(
+                    candidate.client, candidate.monitor, *candidate.rect.center
+                )
+                succeeded = True
+            elif candidate.action_index >= 0:
                 succeeded = bool(candidate.node.get_action_iface().do_action(candidate.action_index))
             else:
                 succeeded = bool(candidate.node.get_component_iface().grab_focus())
+        except BackendError:
+            raise
         except Exception as error:
             raise BackendError("activation-failed", f"The application rejected the action: {error}") from error
         if not succeeded:

@@ -17,6 +17,7 @@ accessibility support.
 
 - Hints across every monitor and every visible window on its active workspace
 - Semantic activation through each control's accessibility action
+- Reliable browser-tab activation in Chromium-family browsers, including Vivaldi
 - Native hints for clickable Omarchy toolbar widgets
 - Live text search with a clearly selected Enter target
 - Selectable scroll regions, including whole-window terminal fallback

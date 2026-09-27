@@ -79,6 +79,14 @@ class DeduplicationTests(unittest.TestCase):
         self.assertEqual(len(result), 1)
         self.assertEqual(result[0].role, "button")
 
+    def test_prefers_browser_tab_pointer_fallback_over_overlapping_section(self) -> None:
+        generic = candidate(Rect(10, 10, 100, 30), "section", "click")
+        tab = Candidate(object(), Rect(10, 10, 100, 30), "page tab", -2, "pointer")
+        result = deduplicate_candidates([generic, tab])
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0].role, "page tab")
+        self.assertEqual(result[0].action_name, "pointer")
+
     def test_keeps_distinct_targets_and_sorts_spatially(self) -> None:
         bottom = candidate(Rect(5, 100, 20, 20))
         top_right = candidate(Rect(80, 10, 20, 20))

@@ -43,6 +43,15 @@ class ActionSelectionTests(unittest.TestCase):
     def test_default_action_is_allowed_for_semantic_role(self) -> None:
         self.assertEqual(choose_action("list item", ["dodefault"], set()), (0, "dodefault"))
 
+    def test_page_tab_without_direct_action_uses_pointer_fallback(self) -> None:
+        self.assertEqual(
+            choose_action("page tab", ["clickAncestor", "showContextMenu"], {"enabled"}),
+            (-2, "pointer"),
+        )
+
+    def test_page_tab_prefers_direct_action_over_pointer_fallback(self) -> None:
+        self.assertEqual(choose_action("page tab", ["press"], {"enabled"}), (0, "press"))
+
     def test_focusable_editor_uses_focus_fallback(self) -> None:
         self.assertEqual(choose_action("entry", [], {"focusable"}), (-1, "focus"))
 
@@ -102,6 +111,30 @@ class ActivationTests(unittest.TestCase):
         session = self.session_with(Candidate(node, Rect(1, 1, 10, 10), "entry", -1, "focus"))
         self.assertTrue(session.activate(0)["ok"])
         self.assertEqual(node.calls, 1)
+
+    def test_page_tab_pointer_fallback_clicks_exact_window(self) -> None:
+        monitor = Monitor("test", Rect(100, 50, 1000, 800), monitor_id=2)
+        client = Client(42, Rect(200, 100, 600, 500), 2, address="0xabc123")
+        candidate = Candidate(
+            object(), Rect(120, 70, 80, 30), "page tab", -2, "pointer",
+            "test", client, monitor,
+        )
+        session = BackendSession()
+        session.result = ScanResult(monitor, [candidate], 1, False)
+        with (
+            patch("omajump.backend.time.sleep"),
+            patch(
+                "omajump.backend.subprocess.run",
+                return_value=SimpleNamespace(stdout="ok\n"),
+            ) as run,
+        ):
+            response = session.activate(0)
+        self.assertTrue(response["ok"])
+        commands = [call.args[0][-1] for call in run.call_args_list]
+        self.assertIn('window = "address:0xabc123"', commands[0])
+        self.assertIn("x = 260", commands[1])
+        self.assertIn("y = 135", commands[1])
+        self.assertIn('key = "mouse:272"', commands[2])
 
     def test_invalid_target_never_invokes_an_action(self) -> None:
         node = _ActionNode()

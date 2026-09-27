@@ -439,7 +439,7 @@ Item {
       return
     }
     if (!helper.running) return
-    activationPending = true; statusText = "Activating…"
+    activationPending = true; overlayVisible = false
     helper.write(JSON.stringify({ type: "activate", id: targetId }) + "\n")
   }
 

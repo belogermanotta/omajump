@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.belogermanotta.omajump",
   "name": "OmaJump",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "author": "belogermanotta",
   "license": "MIT",
   "description": "Navigate, search, scroll, and copy text across every screen",

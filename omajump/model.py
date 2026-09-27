@@ -74,6 +74,8 @@ class Candidate:
     action_index: int
     action_name: str
     monitor_name: str = ""
+    client: Client | None = None
+    monitor: Monitor | None = None
 
 
 def almost_equal(left: float, right: float, tolerance: float = 0.08) -> bool:
