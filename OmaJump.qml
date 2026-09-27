@@ -211,6 +211,7 @@ Item {
   function toggle() { if (root.opened) dismiss(); else open("{}") }
 
   function showTransient(message) {
+    console.warn("OmaJump:", message)
     scanning = false; overlayVisible = true; statusText = message
     if (helper.running) { stoppingHelper = true; helper.running = false }
     dismissTimer.restart()
@@ -289,6 +290,7 @@ Item {
       sortSpatially(combined); baseTargets = combined.slice(); setTargetRows(combined, true)
     }
     overlayVisible = true
+    console.info("OmaJump:", interactionMode, "targets ready:", targets.count)
     if (targets.count === 0) {
       statusText = interactionMode === "search" ? "No readable text found on the active screens"
         : interactionMode === "scroll" ? "No scrollable regions found on the active screens"
@@ -460,7 +462,7 @@ Item {
     }
   }
 
-  Timer { id: scanTimeout; interval: 6000; repeat: false; onTriggered: root.showTransient("OmaJump timed out while inspecting the active screens") }
+  Timer { id: scanTimeout; interval: 15000; repeat: false; onTriggered: root.showTransient("OmaJump timed out while inspecting the active screens") }
   Timer { id: dismissTimer; interval: 1700; repeat: false; onTriggered: root.dismiss() }
 
   Variants {

@@ -189,7 +189,11 @@ PanelWindow {
       id: statusLabel
       anchors.centerIn: parent
       width: Math.min(implicitWidth, parent.width - 24)
-      text: root.statusText || "Finding controls on all screens…"
+      text: root.statusText || (root.interactionMode === "paragraph"
+        ? "Finding paragraphs on all screens…"
+        : root.interactionMode === "search" ? "Finding text on all screens…"
+        : root.interactionMode === "scroll" ? "Finding scroll regions on all screens…"
+        : "Finding controls on all screens…")
       color: root.statusForeground
       font.family: root.fontFamily
       font.pixelSize: root.badgeFontSize
