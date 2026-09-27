@@ -11,6 +11,7 @@ import subprocess
 import sys
 import time
 from dataclasses import dataclass, field
+from functools import lru_cache
 from typing import Any, Callable, Iterable
 
 from .geometry import CoordinateMapper, deduplicate_candidates, frame_match_score
@@ -60,6 +61,35 @@ STRUCTURAL_ROLES = {
     "status bar",
 }
 
+SCROLLABLE_ROLES = {
+    "document frame",
+    "document web",
+    "list",
+    "scroll pane",
+    "table",
+    "terminal",
+    "tree",
+    "viewport",
+}
+
+TEXT_ROLES = {
+    "button",
+    "caption",
+    "check box",
+    "document frame",
+    "document web",
+    "entry",
+    "heading",
+    "label",
+    "link",
+    "list item",
+    "menu item",
+    "paragraph",
+    "radio button",
+    "static",
+    "text",
+}
+
 
 class BackendError(RuntimeError):
     def __init__(self, code: str, message: str) -> None:
@@ -93,67 +123,83 @@ def _json_command(*args: str) -> Any:
         raise BackendError("hyprland-unavailable", f"Could not query Hyprland: {error}") from error
 
 
-def _screen_geometry() -> tuple[list[Client], Monitor]:
+def _screens_geometry() -> tuple[list[tuple[list[Client], Monitor]], str]:
+    """Return visible clients for every monitor's active workspace."""
+
     monitors_json = _json_command("hyprctl", "-j", "monitors")
     clients_json = _json_command("hyprctl", "-j", "clients")
-    monitor_data = next((item for item in monitors_json if item.get("focused")), None)
-    if monitor_data is None:
-        raise BackendError("no-monitor", "Could not identify the focused monitor")
-
-    scale = max(0.1, float(monitor_data.get("scale", 1.0)))
-    width = float(monitor_data.get("width", 0))
-    height = float(monitor_data.get("height", 0))
-    if int(monitor_data.get("transform", 0)) % 2:
-        width, height = height, width
-    monitor = Monitor(
-        name=str(monitor_data.get("name", "")),
-        rect=Rect(
-            float(monitor_data.get("x", 0)),
-            float(monitor_data.get("y", 0)),
-            width / scale,
-            height / scale,
-        ),
-        scale=scale,
-        monitor_id=int(monitor_data.get("id", -1)),
+    focused_name = next(
+        (str(item.get("name", "")) for item in monitors_json if item.get("focused")), ""
     )
-    workspace_id = int(monitor_data.get("activeWorkspace", {}).get("id", -1))
-    clients: list[Client] = []
-    for item in clients_json:
-        item_workspace = int(item.get("workspace", {}).get("id", -2))
-        at = item.get("at", [0, 0])
-        size = item.get("size", [0, 0])
-        client = Client(
-            pid=int(item.get("pid", 0)),
-            rect=Rect(float(at[0]), float(at[1]), float(size[0]), float(size[1])),
-            monitor_id=int(item.get("monitor", -2)),
-            workspace_id=item_workspace,
-            focus_history_id=int(item.get("focusHistoryID", -1)),
-            fullscreen=int(item.get("fullscreen", 0)),
-            title=str(item.get("title", "")),
-            address=str(item.get("address", "")),
-        )
-        if (
-            client.pid > 0
-            and client.monitor_id == monitor.monitor_id
-            and client.workspace_id == workspace_id
-            and bool(item.get("mapped", True))
-            and not bool(item.get("hidden", False))
-            and client.rect.width > 1
-            and client.rect.height > 1
-            and client.rect.intersection(monitor.rect) is not None
-        ):
-            clients.append(client)
+    if not monitors_json or not focused_name:
+        raise BackendError("no-monitor", "Could not identify the connected monitors")
 
-    fullscreen_clients = [client for client in clients if client.fullscreen == 2]
-    if fullscreen_clients:
-        clients = fullscreen_clients
-    clients.sort(
-        key=lambda client: (
-            client.focus_history_id < 0,
-            client.focus_history_id if client.focus_history_id >= 0 else 1_000_000,
+    contexts: list[tuple[list[Client], Monitor]] = []
+    for monitor_data in monitors_json:
+        scale = max(0.1, float(monitor_data.get("scale", 1.0)))
+        width = float(monitor_data.get("width", 0))
+        height = float(monitor_data.get("height", 0))
+        if int(monitor_data.get("transform", 0)) % 2:
+            width, height = height, width
+        monitor = Monitor(
+            name=str(monitor_data.get("name", "")),
+            rect=Rect(
+                float(monitor_data.get("x", 0)),
+                float(monitor_data.get("y", 0)),
+                width / scale,
+                height / scale,
+            ),
+            scale=scale,
+            monitor_id=int(monitor_data.get("id", -1)),
         )
-    )
-    return clients, monitor
+        workspace_id = int(monitor_data.get("activeWorkspace", {}).get("id", -1))
+        visible: list[Client] = []
+        for item in clients_json:
+            at = item.get("at", [0, 0])
+            size = item.get("size", [0, 0])
+            client = Client(
+                pid=int(item.get("pid", 0)),
+                rect=Rect(float(at[0]), float(at[1]), float(size[0]), float(size[1])),
+                monitor_id=int(item.get("monitor", -2)),
+                workspace_id=int(item.get("workspace", {}).get("id", -2)),
+                focus_history_id=int(item.get("focusHistoryID", -1)),
+                fullscreen=int(item.get("fullscreen", 0)),
+                title=str(item.get("title", "")),
+                address=str(item.get("address", "")),
+                class_name=str(item.get("class", "")),
+            )
+            if (
+                client.pid > 0
+                and client.monitor_id == monitor.monitor_id
+                and client.workspace_id == workspace_id
+                and bool(item.get("mapped", True))
+                and not bool(item.get("hidden", False))
+                and client.rect.width > 1
+                and client.rect.height > 1
+                and client.rect.intersection(monitor.rect) is not None
+            ):
+                visible.append(client)
+        fullscreen_clients = [client for client in visible if client.fullscreen == 2]
+        if fullscreen_clients:
+            visible = fullscreen_clients
+        visible.sort(
+            key=lambda client: (
+                client.focus_history_id < 0,
+                client.focus_history_id if client.focus_history_id >= 0 else 1_000_000,
+            )
+        )
+        contexts.append((visible, monitor))
+    return contexts, focused_name
+
+
+def _screen_geometry() -> tuple[list[Client], Monitor]:
+    """Compatibility wrapper returning the focused monitor context."""
+
+    contexts, focused_name = _screens_geometry()
+    for clients, monitor in contexts:
+        if monitor.name == focused_name:
+            return clients, monitor
+    raise BackendError("no-monitor", "Could not identify the focused monitor")
 
 
 def _parent_pid(pid: int) -> int:
@@ -166,13 +212,14 @@ def _parent_pid(pid: int) -> int:
         return 0
 
 
-def _ancestry(pid: int, limit: int = 24) -> list[int]:
+@lru_cache(maxsize=512)
+def _ancestry(pid: int, limit: int = 24) -> tuple[int, ...]:
     result: list[int] = []
     current = pid
     while current > 1 and current not in result and len(result) < limit:
         result.append(current)
         current = _parent_pid(current)
-    return result
+    return tuple(result)
 
 
 def process_distance(left: int, right: int) -> int | None:
@@ -310,9 +357,7 @@ def _has_focused_descendant(application: Any, Atspi: Any, budget: int = 2500) ->
     return False
 
 
-def _match_windows(
-    desktop: Any, clients: list[Client], monitor: Monitor, Atspi: Any
-) -> list[tuple[Client, Any, Rect]]:
+def _window_inventory(desktop: Any, Atspi: Any) -> list[tuple[int, Any, Any, Rect]]:
     inventory: list[tuple[int, Any, Any, Rect]] = []
     for application in _children(desktop, 200):
         try:
@@ -323,9 +368,21 @@ def _match_windows(
             (app_pid, application, frame, rect)
             for frame, rect in _top_level_frames(application, Atspi)
         )
+    return inventory
 
+
+def _match_windows(
+    desktop: Any,
+    clients: list[Client],
+    monitor: Monitor,
+    Atspi: Any,
+    inventory: list[tuple[int, Any, Any, Rect]] | None = None,
+    used: set[int] | None = None,
+) -> list[tuple[Client, Any, Rect]]:
+    if inventory is None:
+        inventory = _window_inventory(desktop, Atspi)
     matches: list[tuple[Client, Any, Rect]] = []
-    used: set[int] = set()
+    used = used if used is not None else set()
     for client in clients:
         choices: list[tuple[float, int]] = []
         for index, (app_pid, _application, _frame, rect) in enumerate(inventory):
@@ -366,6 +423,58 @@ def _action_names(node: Any) -> list[str]:
         return []
 
 
+def _node_text(node: Any) -> str:
+    """Return a compact accessible label suitable for live text search."""
+
+    values: list[str] = []
+    try:
+        values.append(str(node.get_name() or ""))
+    except Exception:
+        pass
+    if not any(value.strip() for value in values):
+        try:
+            text_iface = node.get_text_iface()
+            values.append(str(text_iface.get_text(0, min(240, text_iface.get_character_count())) or ""))
+        except Exception:
+            pass
+    return " ".join(" ".join(values).split())[:240]
+
+
+def _is_scrollable(node: Any, role: str) -> bool:
+    if role in SCROLLABLE_ROLES:
+        return True
+    try:
+        attributes = node.get_attributes() or []
+        if isinstance(attributes, dict):
+            values = (f"{key}:{value}" for key, value in attributes.items())
+        else:
+            values = (str(value) for value in attributes)
+        return any(value.casefold() in {"scrollable:true", "scrollable:1"} for value in values)
+    except Exception:
+        return False
+
+
+@dataclass(slots=True)
+class FallbackTarget:
+    client: Client
+    monitor: Monitor
+
+
+@dataclass(slots=True)
+class SearchTarget:
+    text: str
+    monitor: Monitor
+    rect: Rect
+
+
+@dataclass(slots=True)
+class ScrollTarget:
+    node: object | None
+    client: Client
+    monitor: Monitor
+    rect: Rect
+
+
 @dataclass(slots=True)
 class ScanResult:
     monitor: Monitor
@@ -373,6 +482,11 @@ class ScanResult:
     nodes_scanned: int
     truncated: bool
     fallback_clients: list[Client] = field(default_factory=list)
+    monitors: list[Monitor] = field(default_factory=list)
+    fallback_targets: list[FallbackTarget] = field(default_factory=list)
+    search_targets: list[SearchTarget] = field(default_factory=list)
+    scroll_targets: list[ScrollTarget] = field(default_factory=list)
+    input_monitor: str = ""
 
 
 class BackendSession:
@@ -400,103 +514,227 @@ class BackendSession:
     def scan(
         self,
         context_callback: Callable[[dict[str, Any]], None] | None = None,
+        mode: str = "hints",
     ) -> dict[str, Any]:
+        if mode not in {"hints", "search", "scroll"}:
+            raise BackendError("invalid-mode", f"Unknown OmaJump mode: {mode}")
         Atspi = self._load_atspi()
-        clients, monitor = _screen_geometry()
+        contexts, input_monitor = _screens_geometry()
+        monitor = next(
+            (item for _clients, item in contexts if item.name == input_monitor),
+            contexts[0][1],
+        )
         if context_callback is not None:
-            context_callback({"type": "context", "monitor": monitor.name})
+            context_callback(
+                {
+                    "type": "context",
+                    "inputMonitor": input_monitor,
+                    "monitors": [item.name for _clients, item in contexts],
+                }
+            )
         desktop = Atspi.get_desktop(0)
         if desktop is None:
             raise BackendError("atspi-unavailable", "The AT-SPI desktop could not be opened")
 
         candidates: list[Candidate] = []
+        search_targets: list[SearchTarget] = []
+        scroll_targets: list[ScrollTarget] = []
+        fallback_targets: list[FallbackTarget] = []
         nodes_scanned = 0
         truncated = False
-        matches = _match_windows(desktop, clients, monitor, Atspi)
-        fallback_clients: list[Client] = []
-        for client, frame, frame_rect in matches:
-            candidate_count_before = len(candidates)
-            _prime_accessibility(frame)
-            mapper = CoordinateMapper.infer(client, monitor, frame_rect)
-            stack: list[tuple[Any, int, float]] = [(frame, 0, mapper.base_scale)]
-            window_nodes = 0
+        inventory = _window_inventory(desktop, Atspi)
+        used_inventory: set[int] = set()
+        windows_scanned = 0
+        windows_considered = sum(len(clients) for clients, _monitor in contexts)
 
-            while stack and window_nodes < self.max_nodes:
-                node, depth, inherited_scale = stack.pop()
-                window_nodes += 1
-                nodes_scanned += 1
-                role = _role(node)
-                raw_rect = _rect_for(node, Atspi)
-                node_scale = (
-                    mapper.derive_scale(raw_rect, inherited_scale, role)
-                    if raw_rect is not None
-                    else inherited_scale
-                )
-                states = _node_states(node, Atspi)
-                selected = choose_action(role, _action_names(node), states)
+        for clients, current_monitor in contexts:
+            matches = _match_windows(
+                desktop, clients, current_monitor, Atspi, inventory, used_inventory
+            )
+            windows_scanned += len(matches)
+            matched_client_ids = {id(client) for client, _frame, _rect in matches}
+            for client, frame, frame_rect in matches:
+                window_candidates: list[Candidate] = []
+                window_scroll_targets: list[ScrollTarget] = []
+                _prime_accessibility(frame)
+                mapper = CoordinateMapper.infer(client, current_monitor, frame_rect)
+                stack: list[tuple[Any, int, float]] = [(frame, 0, mapper.base_scale)]
+                window_nodes = 0
 
-                if (
-                    raw_rect is not None
-                    and selected is not None
-                    and {"enabled", "showing", "visible"}.issubset(states)
-                ):
-                    visible = mapper.visible_rect(raw_rect, node_scale)
-                    covers_window = (
-                        visible is not None
-                        and visible.area / max(1.0, client.rect.area) >= 0.65
-                        and role not in DEFAULT_ACTION_ROLES
-                        and role not in EDITABLE_ROLES
+                while stack and window_nodes < self.max_nodes:
+                    node, depth, inherited_scale = stack.pop()
+                    window_nodes += 1
+                    nodes_scanned += 1
+                    role = _role(node)
+                    raw_rect = _rect_for(node, Atspi)
+                    node_scale = (
+                        mapper.derive_scale(raw_rect, inherited_scale, role)
+                        if raw_rect is not None
+                        else inherited_scale
                     )
-                    if (
+                    states = _node_states(node, Atspi)
+                    visible = mapper.visible_rect(raw_rect, node_scale) if raw_rect is not None else None
+
+                    if mode == "hints":
+                        selected = choose_action(role, _action_names(node), states)
+                        covers_window = (
+                            visible is not None
+                            and visible.area / max(1.0, client.rect.area) >= 0.65
+                            and role not in DEFAULT_ACTION_ROLES
+                            and role not in EDITABLE_ROLES
+                        )
+                        if (
+                            visible is not None
+                            and selected is not None
+                            and {"enabled", "showing", "visible"}.issubset(states)
+                            and not covers_window
+                            and visible.width >= 2
+                            and visible.height >= 2
+                        ):
+                            action_index, action_name = selected
+                            window_candidates.append(
+                                Candidate(
+                                    node=node,
+                                    rect=mapper.overlay_rect(visible),
+                                    role=role,
+                                    action_index=action_index,
+                                    action_name=action_name,
+                                    monitor_name=current_monitor.name,
+                                )
+                            )
+                    elif mode == "search":
+                        if (
+                            visible is not None
+                            and role in TEXT_ROLES
+                            and {"showing", "visible"}.issubset(states)
+                            and visible.width >= 2
+                            and visible.height >= 2
+                        ):
+                            text = _node_text(node)
+                            if text:
+                                search_targets.append(
+                                    SearchTarget(text, current_monitor, mapper.overlay_rect(visible))
+                                )
+                    elif (
                         visible is not None
-                        and not covers_window
-                        and visible.width >= 2
-                        and visible.height >= 2
+                        and _is_scrollable(node, role)
+                        and {"showing", "visible"}.issubset(states)
+                        and visible.width >= 64
+                        and visible.height >= 64
                     ):
-                        action_index, action_name = selected
-                        candidates.append(
-                            Candidate(
-                                node=node,
-                                rect=mapper.overlay_rect(visible),
-                                role=role,
-                                action_index=action_index,
-                                action_name=action_name,
+                        window_scroll_targets.append(
+                            ScrollTarget(node, client, current_monitor, mapper.overlay_rect(visible))
+                        )
+
+                    if depth < 48:
+                        children = _children(node)
+                        if not children:
+                            _prime_accessibility(node, timeout=0.12)
+                            children = _children(node)
+                        stack.extend(
+                            (child, depth + 1, node_scale) for child in reversed(children)
+                        )
+                truncated = truncated or bool(stack)
+                if mode == "hints":
+                    window_candidates = deduplicate_candidates(window_candidates)
+                    candidates.extend(window_candidates)
+                    if not window_candidates:
+                        fallback_targets.append(FallbackTarget(client, current_monitor))
+                elif mode == "scroll":
+                    if window_scroll_targets:
+                        # Prefer the most specific region when nested containers overlap.
+                        for item in sorted(window_scroll_targets, key=lambda target: target.rect.area):
+                            if not any(
+                                item.monitor.name == kept.monitor.name
+                                and item.rect.iou(kept.rect) >= 0.86
+                                for kept in scroll_targets
+                            ):
+                                scroll_targets.append(item)
+                    else:
+                        scroll_targets.append(
+                            ScrollTarget(
+                                None,
+                                client,
+                                current_monitor,
+                                Rect(
+                                    client.rect.x - current_monitor.rect.x,
+                                    client.rect.y - current_monitor.rect.y,
+                                    client.rect.width,
+                                    client.rect.height,
+                                ),
                             )
                         )
 
-                if depth < 48:
-                    children = _children(node)
-                    if not children:
-                        _prime_accessibility(node, timeout=0.12)
-                        children = _children(node)
-                    stack.extend(
-                        (child, depth + 1, node_scale) for child in reversed(children)
+            if mode == "hints":
+                fallback_targets.extend(
+                    FallbackTarget(client, current_monitor)
+                    for client in clients
+                    if id(client) not in matched_client_ids
+                )
+            elif mode == "scroll":
+                scroll_targets.extend(
+                    ScrollTarget(
+                        None,
+                        client,
+                        current_monitor,
+                        Rect(
+                            client.rect.x - current_monitor.rect.x,
+                            client.rect.y - current_monitor.rect.y,
+                            client.rect.width,
+                            client.rect.height,
+                        ),
                     )
-            truncated = truncated or bool(stack)
-            if len(candidates) == candidate_count_before:
-                fallback_clients.append(client)
+                    for client in clients
+                    if id(client) not in matched_client_ids
+                )
 
-        matched_client_ids = {id(client) for client, _frame, _rect in matches}
-        fallback_clients.extend(
-            client for client in clients if id(client) not in matched_client_ids
-        )
-
-        candidates = deduplicate_candidates(candidates)
+        # Remove repeated accessible text fragments and nested duplicate regions.
+        unique_search: list[SearchTarget] = []
+        search_keys: set[tuple[Any, ...]] = set()
+        for item in search_targets:
+            key = (
+                item.monitor.name,
+                item.text.casefold(),
+                round(item.rect.x),
+                round(item.rect.y),
+                round(item.rect.width),
+                round(item.rect.height),
+            )
+            if key not in search_keys:
+                search_keys.add(key)
+                unique_search.append(item)
+        search_targets = unique_search[:1500]
         if len(candidates) > self.max_targets:
             candidates = candidates[: self.max_targets]
             truncated = True
+        if len(scroll_targets) > self.max_targets:
+            scroll_targets = scroll_targets[: self.max_targets]
+            truncated = True
+        fallback_clients = [item.client for item in fallback_targets]
         self.result = ScanResult(
-            monitor, candidates, nodes_scanned, truncated, fallback_clients
+            monitor,
+            candidates,
+            nodes_scanned,
+            truncated,
+            fallback_clients,
+            [item for _clients, item in contexts],
+            fallback_targets,
+            search_targets,
+            scroll_targets,
+            input_monitor,
         )
         labels = generate_labels(len(candidates))
 
         return {
             "type": "targets",
-            "monitor": monitor.name,
+            "mode": mode,
+            "inputMonitor": input_monitor,
+            "monitors": [item.name for _clients, item in contexts],
             "targets": [
                 {
                     "id": index,
                     "label": labels[index],
+                    "monitor": candidate.monitor_name,
                     "x": round(candidate.rect.x, 2),
                     "y": round(candidate.rect.y, 2),
                     "width": round(candidate.rect.width, 2),
@@ -507,20 +745,42 @@ class BackendSession:
             "fallbackWindows": [
                 {
                     "id": index,
-                    "x": round(client.rect.x - monitor.rect.x, 2),
-                    "y": round(client.rect.y - monitor.rect.y, 2),
-                    "width": round(client.rect.width, 2),
-                    "height": round(client.rect.height, 2),
+                    "monitor": target.monitor.name,
+                    "x": round(target.client.rect.x - target.monitor.rect.x, 2),
+                    "y": round(target.client.rect.y - target.monitor.rect.y, 2),
+                    "width": round(target.client.rect.width, 2),
+                    "height": round(target.client.rect.height, 2),
                 }
-                for index, client in enumerate(fallback_clients)
+                for index, target in enumerate(fallback_targets)
+            ],
+            "searchTargets": [
+                {
+                    "text": target.text,
+                    "monitor": target.monitor.name,
+                    "x": round(target.rect.x, 2),
+                    "y": round(target.rect.y, 2),
+                    "width": round(target.rect.width, 2),
+                    "height": round(target.rect.height, 2),
+                }
+                for target in search_targets
+            ],
+            "scrollTargets": [
+                {
+                    "id": index,
+                    "monitor": target.monitor.name,
+                    "x": round(target.rect.x, 2),
+                    "y": round(target.rect.y, 2),
+                    "width": round(target.rect.width, 2),
+                    "height": round(target.rect.height, 2),
+                }
+                for index, target in enumerate(scroll_targets)
             ],
             "meta": {
                 "nodesScanned": nodes_scanned,
                 "truncated": truncated,
-                "scale": monitor.scale,
-                "windowsConsidered": len(clients),
-                "windowsScanned": len(matches),
-                "unsupportedWindows": len(clients) - len(matches),
+                "windowsConsidered": windows_considered,
+                "windowsScanned": windows_scanned,
+                "unsupportedWindows": windows_considered - windows_scanned,
             },
         }
 
@@ -532,8 +792,14 @@ class BackendSession:
         if not math.isfinite(x) or not math.isfinite(y):
             raise BackendError("invalid-target", "The selected point is invalid")
 
-        client = self.result.fallback_clients[fallback_id]
-        monitor = self.result.monitor
+        if self.result.fallback_targets:
+            fallback = self.result.fallback_targets[fallback_id]
+            client = fallback.client
+            monitor = fallback.monitor
+        else:
+            # Preserve the small direct-construction API used by integrations.
+            client = self.result.fallback_clients[fallback_id]
+            monitor = self.result.monitor
         global_x = monitor.rect.x + x
         global_y = monitor.rect.y + y
         point = Rect(global_x, global_y, 1, 1)
@@ -573,6 +839,52 @@ class BackendSession:
             ) from error
         return {"type": "activated", "id": fallback_id, "ok": True}
 
+    def scroll(self, target_id: int, direction: int) -> dict[str, Any]:
+        if self.result is None:
+            raise BackendError("not-scanned", "No accessibility scan is active")
+        if target_id < 0 or target_id >= len(self.result.scroll_targets):
+            raise BackendError("invalid-target", "The selected scroll region no longer exists")
+        if direction not in {-1, 1}:
+            raise BackendError("invalid-command", "Scroll direction must be up or down")
+
+        target = self.result.scroll_targets[target_id]
+        if target.node is not None:
+            try:
+                target.node.get_component_iface().grab_focus()
+            except Exception:
+                pass
+        client = target.client
+        selector = (
+            f"address:{client.address}"
+            if re.fullmatch(r"0x[0-9a-fA-F]+", client.address)
+            else f"pid:{client.pid}"
+        )
+        terminal = any(
+            name in client.class_name.casefold()
+            for name in ("wezterm", "kitty", "alacritty", "foot", "ghostty", "terminal")
+        )
+        mods = "SHIFT" if terminal else ""
+        key = "PAGE_UP" if direction < 0 else "PAGE_DOWN"
+        command = (
+            f'hl.dsp.send_shortcut({{ mods = "{mods}", key = "{key}", '
+            f'window = "{selector}" }})'
+        )
+        try:
+            completed = subprocess.run(
+                ["hyprctl", "dispatch", command],
+                check=True,
+                text=True,
+                capture_output=True,
+                timeout=1.5,
+            )
+            if completed.stdout.strip() != "ok":
+                raise BackendError(
+                    "scroll-failed", completed.stdout.strip() or "Hyprland rejected the scroll action"
+                )
+        except (FileNotFoundError, subprocess.SubprocessError) as error:
+            raise BackendError("scroll-failed", f"Could not send the scroll action: {error}") from error
+        return {"type": "scrolled", "id": target_id, "direction": direction, "ok": True}
+
     def activate(self, target_id: int) -> dict[str, Any]:
         if self.result is None:
             raise BackendError("not-scanned", "No accessibility scan is active")
@@ -602,10 +914,10 @@ def _error_payload(error: Exception) -> dict[str, Any]:
     return {"type": "error", "code": "internal-error", "message": str(error)}
 
 
-def run(probe: bool = False) -> int:
+def run(probe: bool = False, mode: str = "hints") -> int:
     session = BackendSession()
     try:
-        _emit(session.scan(context_callback=None if probe else _emit))
+        _emit(session.scan(context_callback=None if probe else _emit, mode=mode))
     except Exception as error:
         _emit(_error_payload(error))
         return 1
@@ -627,6 +939,13 @@ def run(probe: bool = False) -> int:
                         float(command.get("y", float("nan"))),
                     )
                 )
+            elif command_type == "scroll":
+                _emit(
+                    session.scroll(
+                        int(command.get("id", -1)),
+                        int(command.get("direction", 0)),
+                    )
+                )
             elif command_type == "quit":
                 return 0
             else:
@@ -639,8 +958,12 @@ def run(probe: bool = False) -> int:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="OmaJump accessibility backend")
     parser.add_argument("--probe", action="store_true", help="scan once without accepting actions")
+    parser.add_argument(
+        "--mode", choices=("hints", "search", "scroll"), default="hints",
+        help="choose controls, text search, or scroll-region discovery",
+    )
     args = parser.parse_args(argv)
-    return run(probe=args.probe)
+    return run(probe=args.probe, mode=args.mode)
 
 
 if __name__ == "__main__":

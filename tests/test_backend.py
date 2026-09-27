@@ -8,8 +8,10 @@ from omajump.backend import (
     BackendError,
     BackendSession,
     ScanResult,
+    ScrollTarget,
     _prime_accessibility,
     _screen_geometry,
+    _screens_geometry,
     _title_match_score,
     choose_action,
     process_distance,
@@ -129,8 +131,54 @@ class ActivationTests(unittest.TestCase):
                 session.click(0, 900, 700)
         run.assert_not_called()
 
+    def test_terminal_scroll_uses_shift_page_down_on_exact_window(self) -> None:
+        session = BackendSession()
+        monitor = Monitor("test", Rect(0, 0, 1000, 800), monitor_id=2)
+        client = Client(
+            42, Rect(100, 100, 500, 400), 2,
+            address="0xabc123", class_name="org.wezfurlong.wezterm",
+        )
+        target = ScrollTarget(None, client, monitor, Rect(100, 100, 500, 400))
+        session.result = ScanResult(
+            monitor, [], 1, False, monitors=[monitor], scroll_targets=[target]
+        )
+        with patch(
+            "omajump.backend.subprocess.run",
+            return_value=SimpleNamespace(stdout="ok\n"),
+        ) as run:
+            response = session.scroll(0, 1)
+        self.assertTrue(response["ok"])
+        command = run.call_args.args[0][-1]
+        self.assertIn('mods = "SHIFT"', command)
+        self.assertIn('key = "PAGE_DOWN"', command)
+        self.assertIn('window = "address:0xabc123"', command)
+
 
 class HyprlandGeometryTests(unittest.TestCase):
+    def test_selects_active_workspace_on_every_monitor(self) -> None:
+        monitors = [
+            {"id": 0, "name": "DP-2", "x": 0, "y": 0, "width": 1920,
+             "height": 1080, "scale": 1, "focused": False,
+             "activeWorkspace": {"id": 1}},
+            {"id": 1, "name": "HDMI-A-2", "x": 1920, "y": 0, "width": 3840,
+             "height": 2160, "scale": 2, "focused": True,
+             "activeWorkspace": {"id": 4}},
+        ]
+        clients = [
+            {"pid": 10, "at": [0, 0], "size": [1920, 1080], "monitor": 0,
+             "workspace": {"id": 1}, "mapped": True},
+            {"pid": 11, "at": [1920, 0], "size": [1920, 1080], "monitor": 1,
+             "workspace": {"id": 4}, "mapped": True},
+            {"pid": 12, "at": [0, 0], "size": [1920, 1080], "monitor": 0,
+             "workspace": {"id": 2}, "mapped": True},
+        ]
+        with patch("omajump.backend._json_command", side_effect=[monitors, clients]):
+            contexts, focused = _screens_geometry()
+        self.assertEqual(focused, "HDMI-A-2")
+        self.assertEqual([monitor.name for _clients, monitor in contexts], ["DP-2", "HDMI-A-2"])
+        self.assertEqual([[client.pid for client in visible] for visible, _monitor in contexts], [[10], [11]])
+        self.assertEqual(contexts[1][1].rect, Rect(1920, 0, 1920, 1080))
+
     def test_selects_visible_clients_on_focused_monitor_workspace(self) -> None:
         monitors = [
             {

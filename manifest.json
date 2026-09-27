@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "id": "omajump",
   "name": "OmaJump",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "author": "OmaJump contributors",
   "license": "MIT",
-  "description": "Navigate visible applications with home-row keyboard hints",
+  "description": "Navigate, search, and scroll every screen from the keyboard",
   "kinds": [
     "overlay"
   ],

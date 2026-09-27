@@ -4,10 +4,11 @@ OmaJump adds Homerow-style keyboard hints to Omarchy. Summon the overlay,
 type the home-row label shown on a control, and OmaJump invokes that control's
 accessibility action without moving the mouse.
 
-Version 0.1 targets every visible application window on the focused monitor's
-active workspace and supports primary activation, a refined pointer-grid
-fallback, Backspace, and Escape. It does not take screenshots, run OCR, connect
-to the network, create a virtual input device, or require root.
+Version 0.2 targets every visible application window on every monitor's active
+workspace. It supports semantic activation, text highlighting, scroll-region
+selection, the Omarchy toolbar, and a refined pointer-grid fallback. It does
+not take screenshots, run OCR, connect to the network, create a virtual input
+device, or require root.
 
 ## Requirements
 
@@ -35,6 +36,8 @@ Add the recommended binding to `~/.config/hypr/bindings.lua`:
 
 ```lua
 o.bind("SUPER + ALT + CTRL + SPACE", "OmaJump", "omarchy-shell shell toggle omajump '{}'")
+o.bind("SUPER + ALT + CTRL + SLASH", "OmaJump text search", "omarchy-shell shell summon omajump '{\"mode\":\"search\"}'")
+o.bind("SUPER + ALT + CTRL + J", "OmaJump scroll regions", "omarchy-shell shell summon omajump '{\"mode\":\"scroll\"}'")
 ```
 
 Check `omarchy menu keybindings --print` first and choose another key if
@@ -50,10 +53,11 @@ OmaJump deliberately does not edit your bindings during installation.
 
 ## Use
 
-1. Focus the monitor containing the applications you want to control.
-2. Press `SUPER + ALT + CTRL + SPACE` (or your chosen binding).
-3. Type a visible hint using `a s d f g h j k l`.
-4. Use Backspace to correct a partial hint or Escape to close the overlay.
+Press `SUPER + ALT + CTRL + SPACE`, then type a visible hint using
+`a s d f g h j k l`. Hints appear simultaneously on every connected screen;
+the screen that was focused when OmaJump opened captures the keyboard. For a
+multi-key hint, characters already typed turn grey. Use Backspace to correct a
+partial hint or Escape to close the overlay.
 
 Labels are prefix-free, so a complete label activates immediately. Targets are
 ordered from top to bottom and left to right; the earliest targets receive the
@@ -64,6 +68,16 @@ OmaJump places one hint at its center. Choose it to enter a highlighted 3×3
 grid, then choose three home-row cells to refine the pointer location and send
 a left click. Backspace moves to the previous grid level. The pointer action is
 sent directly through Hyprland to the selected window.
+
+Press `SUPER + ALT + CTRL + /` for text-search mode. Type at least three
+characters; all matching accessible text is highlighted across every active
+screen. Continue typing to narrow the highlights, Backspace to widen them, or
+Escape to close.
+
+Press `SUPER + ALT + CTRL + J` to label all accessible scroll regions. Choose
+a region, then use Up/Down or `i`/`k` to scroll that exact window. Backspace
+returns to region selection. Apps with sparse accessibility data, including
+terminals such as WezTerm, receive a whole-window scroll region.
 
 ## Update and remove
 
@@ -79,9 +93,9 @@ Remove the optional Hyprland binding yourself if you no longer use the plugin.
 
 Omarchy plugins run as unsandboxed code inside the shell, so review third-party
 plugins before enabling them. OmaJump's helper reads the AT-SPI trees of visible
-windows on the focused monitor and their Hyprland geometry. Accessible names
-remain in the helper and are neither sent to QML nor stored. Only anonymous
-rectangles, numeric IDs, and generated labels cross the local process pipe.
+windows on all active monitors and their Hyprland geometry. Accessible names
+cross the local process pipe only while text-search mode is open and are never
+stored. Normal hint and scroll modes expose only rectangles and numeric IDs.
 Bar-widget geometry and activation stay inside the existing Omarchy Shell
 process. Pointer-grid activation sends only the chosen coordinate and target
 window to the local Hyprland compositor.
@@ -96,10 +110,12 @@ python -m unittest discover -s tests -v
 python -m compileall -q omajump scripts
 ```
 
-Run a read-only scan of the focused screen without invoking any action:
+Run read-only scans of all active screens without invoking any action:
 
 ```bash
 python scripts/omajump_backend.py --probe | python -m json.tool
+python scripts/omajump_backend.py --probe --mode search | python -m json.tool
+python scripts/omajump_backend.py --probe --mode scroll | python -m json.tool
 ```
 
 Run the standalone overlay fixture (Escape closes it):

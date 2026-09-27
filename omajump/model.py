@@ -63,6 +63,7 @@ class Client:
     fullscreen: int = 0
     title: str = ""
     address: str = ""
+    class_name: str = ""
 
 
 @dataclass(slots=True)
@@ -72,6 +73,7 @@ class Candidate:
     role: str
     action_index: int
     action_name: str
+    monitor_name: str = ""
 
 
 def almost_equal(left: float, right: float, tolerance: float = 0.08) -> bool:
