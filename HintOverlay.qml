@@ -128,6 +128,7 @@ PanelWindow {
           anchors.fill: parent
           anchors.margins: 4
           text: targetItem.searchText
+          textFormat: Text.PlainText
           color: "white"
           font.family: root.fontFamily
           font.pixelSize: root.badgeFontSize
@@ -158,6 +159,7 @@ PanelWindow {
 
           Text {
             text: targetItem.label.substring(0, Math.min(root.typedPrefix.length, targetItem.label.length))
+            textFormat: Text.PlainText
             color: root.matchedForeground
             font.family: root.fontFamily
             font.pixelSize: root.badgeFontSize
@@ -165,6 +167,7 @@ PanelWindow {
           }
           Text {
             text: targetItem.label.substring(Math.min(root.typedPrefix.length, targetItem.label.length))
+            textFormat: Text.PlainText
             color: root.badgeForeground
             font.family: root.fontFamily
             font.pixelSize: root.badgeFontSize
@@ -194,6 +197,7 @@ PanelWindow {
         : root.interactionMode === "search" ? "Finding text on all screens…"
         : root.interactionMode === "scroll" ? "Finding scroll regions on all screens…"
         : "Finding controls on all screens…")
+      textFormat: Text.PlainText
       color: root.statusForeground
       font.family: root.fontFamily
       font.pixelSize: root.badgeFontSize
@@ -226,6 +230,7 @@ PanelWindow {
         : (root.scrollSelected
           ? "Scroll with ↑/↓ or i/k · Backspace chooses another region"
           : "Choose a scrollable region")
+      textFormat: Text.PlainText
       color: root.statusForeground
       font.family: root.fontFamily
       font.pixelSize: root.badgeFontSize
