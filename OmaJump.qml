@@ -34,7 +34,8 @@ Item {
   readonly property int searchSelectedId: bestSearchTargetId(typedPrefix, targets.count)
 
   function pluginId() {
-    return root.manifest && root.manifest.id ? root.manifest.id : "omajump"
+    return root.manifest && root.manifest.id
+      ? root.manifest.id : "io.github.belogermanotta.omajump"
   }
 
   function filePath(url) {

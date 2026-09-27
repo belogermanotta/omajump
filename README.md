@@ -2,6 +2,8 @@
 
 Keyboard-first navigation for Omarchy.
 
+![OmaJump semantic hints across browser and terminal windows](preview.png)
+
 OmaJump places short, alphabetical hints over controls on every connected
 screen. Type a hint to activate a control, search visible text, choose an exact
 scroll region, or copy a paragraph—without reaching for the mouse.
@@ -38,10 +40,10 @@ omarchy plugin add https://github.com/belogermanotta/omajump.git --enable
 Add the shortcuts below to `~/.config/hypr/bindings.lua`:
 
 ```lua
-o.bind("SUPER + ALT + CTRL + SPACE", "OmaJump", "omarchy-shell shell toggle omajump '{}'")
-o.bind("SUPER + ALT + CTRL + SLASH", "OmaJump text search", "omarchy-shell shell summon omajump '{\"mode\":\"search\"}'")
-o.bind("SUPER + ALT + CTRL + J", "OmaJump scroll regions", "omarchy-shell shell summon omajump '{\"mode\":\"scroll\"}'")
-o.bind("SUPER + ALT + CTRL + P", "OmaJump copy paragraph", "omarchy-shell shell summon omajump '{\"mode\":\"paragraph\"}'")
+o.bind("SUPER + ALT + CTRL + SPACE", "OmaJump", "omarchy-shell shell toggle io.github.belogermanotta.omajump '{}'")
+o.bind("SUPER + ALT + CTRL + SLASH", "OmaJump text search", "omarchy-shell shell summon io.github.belogermanotta.omajump '{\"mode\":\"search\"}'")
+o.bind("SUPER + ALT + CTRL + J", "OmaJump scroll regions", "omarchy-shell shell summon io.github.belogermanotta.omajump '{\"mode\":\"scroll\"}'")
+o.bind("SUPER + ALT + CTRL + P", "OmaJump copy paragraph", "omarchy-shell shell summon io.github.belogermanotta.omajump '{\"mode\":\"paragraph\"}'")
 ```
 
 Check for conflicts before adding them:
@@ -160,7 +162,7 @@ targets, OmaJump should offer its centered pointer-grid hint.
 Run a read-only probe to see what the backend discovers:
 
 ```bash
-python ~/.config/omarchy/plugins/omajump/scripts/omajump_backend.py --probe \
+python ~/.config/omarchy/plugins/io.github.belogermanotta.omajump/scripts/omajump_backend.py --probe \
   | python -m json.tool
 ```
 
@@ -169,7 +171,7 @@ python ~/.config/omarchy/plugins/omajump/scripts/omajump_backend.py --probe \
 Validate the installed plugin and restart the shell:
 
 ```bash
-omarchy plugin validate ~/.config/omarchy/plugins/omajump
+omarchy plugin validate ~/.config/omarchy/plugins/io.github.belogermanotta.omajump
 omarchy restart shell
 ```
 
@@ -205,9 +207,9 @@ windows on active workspaces:
 ## Update or remove
 
 ```bash
-omarchy plugin update omajump
-omarchy plugin disable omajump
-omarchy plugin remove omajump
+omarchy plugin update io.github.belogermanotta.omajump
+omarchy plugin disable io.github.belogermanotta.omajump
+omarchy plugin remove io.github.belogermanotta.omajump
 ```
 
 Remove the corresponding entries from `~/.config/hypr/bindings.lua` if you no
