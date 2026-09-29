@@ -22,6 +22,7 @@ from omajump.backend import (
     _paragraph_ranges,
     _title_match_score,
     _wezterm_paragraph_targets,
+    assemble_paragraph_targets,
     choose_action,
     deduplicate_paragraph_targets,
     process_distance,
@@ -197,6 +198,67 @@ class ActionSelectionTests(unittest.TestCase):
             object(), client, monitor, Rect(20, 20, 580, 80),
         )
         self.assertEqual(deduplicate_paragraph_targets([loose, precise]), [precise])
+
+    def test_wrapped_list_fragments_are_assembled_into_two_paragraphs(self) -> None:
+        monitor = Monitor("test", Rect(0, 0, 1000, 800), monitor_id=2)
+        client = Client(42, Rect(0, 0, 1000, 800), 2)
+        fragments = [
+            ParagraphTarget(
+                "**Two-way Obsidian sync** — reads today's daily note and renders every",
+                object(), client, monitor, Rect(48, 16, 800, 78), "static",
+            ),
+            ParagraphTarget(
+                "- [ ] ↔ - [x] ... ✅ YYYY-MM-DD toggles",
+                object(), client, monitor, Rect(370, 94, 390, 18), "static",
+            ),
+            ParagraphTarget(
+                "checkbox, and writes back without touching anything else in the file.",
+                object(), client, monitor, Rect(48, 94, 847, 73), "static",
+            ),
+            ParagraphTarget(
+                "**Inline task entry** — add a checklist item directly below TODAY with the",
+                object(), client, monitor, Rect(48, 184, 850, 20), "static",
+            ),
+            ParagraphTarget(
+                "button; press Return to write it into the daily note. Selecting text and "
+                "pasting an HTTP(S) URL turns it into a Markdown link automatically.",
+                object(), client, monitor, Rect(48, 215, 806, 112), "static",
+            ),
+        ]
+
+        assembled = assemble_paragraph_targets(fragments)
+        self.assertEqual(len(assembled), 2)
+        self.assertIn("renders every - [ ] ↔ - [x] ... ✅ YYYY-MM-DD toggles checkbox", assembled[0].text)
+        self.assertTrue(assembled[1].text.startswith("**Inline task entry**"))
+        self.assertIn("with the button; press Return", assembled[1].text)
+
+    def test_blank_line_boundaries_are_never_reassembled(self) -> None:
+        monitor = Monitor("test", Rect(0, 0, 1000, 800), monitor_id=2)
+        client = Client(42, Rect(0, 0, 1000, 800), 2)
+        first = ParagraphTarget(
+            "One short sentence without final punctuation",
+            object(), client, monitor, Rect(20, 20, 500, 30), "static", True,
+        )
+        second = ParagraphTarget(
+            "another short sentence",
+            object(), client, monitor, Rect(20, 51, 500, 30), "static", True,
+        )
+        self.assertEqual(assemble_paragraph_targets([first, second]), [first, second])
+
+    def test_overlapping_fragment_with_leading_period_is_reassembled(self) -> None:
+        monitor = Monitor("test", Rect(0, 0, 1000, 800), monitor_id=2)
+        client = Client(42, Rect(0, 0, 1000, 800), 2)
+        first = ParagraphTarget(
+            "There are no scores in the seven-day window; the last recorded score is",
+            object(), client, monitor, Rect(20, 20, 600, 40), "static",
+        )
+        second = ParagraphTarget(
+            ". Open a daily note and fill its Properties to populate the averages.",
+            object(), client, monitor, Rect(20, 42, 580, 40), "static",
+        )
+        assembled = assemble_paragraph_targets([first, second])
+        self.assertEqual(len(assembled), 1)
+        self.assertIn("score is. Open a daily note", assembled[0].text)
 
 
 class OverlayReleaseTests(unittest.TestCase):

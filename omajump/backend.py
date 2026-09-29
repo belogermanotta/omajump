@@ -663,7 +663,9 @@ def _wezterm_paragraph_targets(
             client.rect.width,
             max(line_height, (last_row - first_row + 1) * line_height),
         )
-        targets.append(ParagraphTarget(paragraph, None, client, monitor, rect))
+        targets.append(
+            ParagraphTarget(paragraph, None, client, monitor, rect, "terminal", separated)
+        )
     return targets
 
 
@@ -750,6 +752,164 @@ def deduplicate_paragraph_targets(
     return [targets[index] for index in sorted(kept)]
 
 
+def _paragraph_continues(left: "ParagraphTarget", right: "ParagraphTarget") -> bool:
+    if (
+        left.monitor.name != right.monitor.name
+        or left.client != right.client
+        or left.explicit_boundary
+        or right.explicit_boundary
+    ):
+        return False
+    left_text = left.text.rstrip()
+    right_text = right.text.lstrip()
+    if not left_text or not right_text or left_text[-1] in ".!?":
+        return False
+    if len(left_text.split()) < 3 or len(right_text.split()) < 3:
+        return False
+    first = right_text.lstrip("`*_([{\"'")[:1]
+    if not first or (not first.islower() and first not in ",.;:!?"):
+        return False
+
+    vertical_gap = right.rect.y - left.rect.bottom
+    max_gap = max(12.0, min(left.rect.height, right.rect.height) * 0.45)
+    if vertical_gap < -min(left.rect.height, right.rect.height) * 0.6 or vertical_gap > max_gap:
+        return False
+    left_edge_tolerance = max(12.0, min(left.rect.width, right.rect.width) * 0.04)
+    if abs(left.rect.x - right.rect.x) > left_edge_tolerance:
+        return False
+    horizontal_overlap = min(left.rect.right, right.rect.right) - max(left.rect.x, right.rect.x)
+    return horizontal_overlap / max(1.0, min(left.rect.width, right.rect.width)) >= 0.75
+
+
+def _merge_paragraph_pair(
+    left: "ParagraphTarget", right: "ParagraphTarget"
+) -> "ParagraphTarget":
+    x = min(left.rect.x, right.rect.x)
+    y = min(left.rect.y, right.rect.y)
+    right_edge = max(left.rect.right, right.rect.right)
+    bottom = max(left.rect.bottom, right.rect.bottom)
+    role = "paragraph" if "paragraph" in {left.role, right.role} else right.role or left.role
+    right_text = right.text.lstrip()
+    separator = "" if right_text[:1] in ",.;:!?" else " "
+    return ParagraphTarget(
+        f"{left.text.rstrip()}{separator}{right_text}",
+        left.node,
+        left.client,
+        left.monitor,
+        Rect(x, y, right_edge - x, bottom - y),
+        role,
+        False,
+    )
+
+
+def assemble_paragraph_targets(
+    targets: list["ParagraphTarget"],
+) -> list["ParagraphTarget"]:
+    """Deduplicate nested nodes, join wrapped fragments, and filter prose."""
+
+    deduplicated = deduplicate_paragraph_targets(targets)
+    paragraphs = [
+        target
+        for target in deduplicated
+        if _is_paragraph_like(
+            target.role,
+            target.text,
+            target.rect,
+            target.explicit_boundary,
+        )
+    ]
+    short_fragments = [target for target in deduplicated if target not in paragraphs]
+
+    # Inline links, code spans, bold text, and dates can be separate short
+    # accessibles inside a larger prose range. Only accept one-line fragments
+    # on the range's first visual line. A broad containment check can otherwise
+    # pull unrelated browser chrome into a large, imprecise AT-SPI rectangle.
+    contained: dict[int, list[ParagraphTarget]] = {}
+    assigned: set[int] = set()
+    for fragment_index, fragment in enumerate(short_fragments):
+        fragment_text = " ".join(fragment.text.casefold().split())
+        choices: list[tuple[float, float, int]] = []
+        for paragraph_index, paragraph in enumerate(paragraphs):
+            if fragment.monitor.name != paragraph.monitor.name or fragment.client != paragraph.client:
+                continue
+            paragraph_text = " ".join(paragraph.text.casefold().split())
+            if not fragment_text or fragment_text in paragraph_text:
+                continue
+            if (
+                fragment.rect.height > 24.0
+                or fragment.rect.width >= paragraph.rect.width * 0.8
+                or abs(fragment.rect.y - paragraph.rect.y) > 4.0
+            ):
+                continue
+            overlap = fragment.rect.intersection(paragraph.rect)
+            if overlap is None or fragment.rect.area <= 0:
+                continue
+            if overlap.area / fragment.rect.area >= 0.8:
+                choices.append(
+                    (abs(fragment.rect.y - paragraph.rect.y), paragraph.rect.area, paragraph_index)
+                )
+        if choices:
+            paragraph_index = min(choices)[2]
+            contained.setdefault(paragraph_index, []).append(fragment)
+            assigned.add(fragment_index)
+
+    short_fragments = [
+        fragment
+        for index, fragment in enumerate(short_fragments)
+        if index not in assigned
+    ]
+
+    # Formatting can expose a one-line bold/link prefix separately from the
+    # paragraph-sized continuation. Attach only the nearest grammatical and
+    # geometric prefix; unrelated short UI labels never become targets.
+    for index, paragraph in enumerate(paragraphs):
+        prefixes = [
+            fragment
+            for fragment in short_fragments
+            if _paragraph_continues(fragment, paragraph)
+        ]
+        if prefixes:
+            prefix = max(prefixes, key=lambda fragment: fragment.rect.bottom)
+            paragraphs[index] = _merge_paragraph_pair(prefix, paragraph)
+            short_fragments.remove(prefix)
+
+    ordered = sorted(
+        enumerate(paragraphs),
+        key=lambda item: (
+            item[1].monitor.name,
+            item[1].client.rect.x,
+            item[1].client.rect.y,
+            round(item[1].rect.y, 2),
+            round(item[1].rect.x, 2),
+        ),
+    )
+    merged: list[ParagraphTarget] = []
+    for paragraph_index, target in ordered:
+        continues = bool(merged and _paragraph_continues(merged[-1], target))
+        inline = sorted(
+            contained.get(paragraph_index, []),
+            key=lambda fragment: fragment.rect.x,
+        )
+        if inline:
+            combined = inline[0]
+            for fragment in inline[1:]:
+                combined = _merge_paragraph_pair(combined, fragment)
+            # A fragment at the left edge is an omitted formatted opener. On
+            # a continuation line, an interior token belongs at the seam. A
+            # lone interior token on an initial line is most safely a suffix.
+            if continues or inline[0].rect.x <= target.rect.x + 20.0:
+                target = _merge_paragraph_pair(combined, target)
+            else:
+                target = _merge_paragraph_pair(target, combined)
+        if continues:
+            merged[-1] = _merge_paragraph_pair(merged[-1], target)
+        elif merged and _paragraph_continues(merged[-1], target):
+            merged[-1] = _merge_paragraph_pair(merged[-1], target)
+        else:
+            merged.append(target)
+    return merged
+
+
 @dataclass(slots=True)
 class FallbackTarget:
     client: Client
@@ -780,6 +940,8 @@ class ParagraphTarget:
     client: Client
     monitor: Monitor
     rect: Rect
+    role: str = ""
+    explicit_boundary: bool = False
 
 
 @dataclass(slots=True)
@@ -991,17 +1153,14 @@ class BackendSession:
                                     if len(ranges) == 1
                                     else _approximate_range_rect(visible, source, start, end)
                                 )
-                                if block_visible is None or not _is_paragraph_like(
-                                    role,
-                                    text,
-                                    mapper.overlay_rect(block_visible),
-                                    separated,
-                                ):
+                                if block_visible is None:
                                     continue
                                 paragraph_targets.append(
                                     ParagraphTarget(
                                         text, node, client, current_monitor,
                                         mapper.overlay_rect(block_visible),
+                                        role,
+                                        separated,
                                     )
                                 )
                     elif (
@@ -1107,7 +1266,7 @@ class BackendSession:
                 search_keys.add(key)
                 unique_search.append(item)
         search_targets = unique_search[:1500]
-        paragraph_targets = deduplicate_paragraph_targets(paragraph_targets)[: self.max_targets]
+        paragraph_targets = assemble_paragraph_targets(paragraph_targets)[: self.max_targets]
         if len(candidates) > self.max_targets:
             candidates = candidates[: self.max_targets]
             truncated = True
