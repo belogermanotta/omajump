@@ -109,7 +109,7 @@ Choose the hint over the region you want to control, then use:
 - <kbd>Backspace</kbd> to choose another region
 - <kbd>Escape</kbd> to close
 
-OmaJump sends Page Up/Page Down to the exact selected window. Common terminals,
+OmaJump sends explicit Page Up/Page Down key-down and key-up events to the exact selected window. Common terminals,
 including WezTerm, Kitty, Alacritty, Foot, and Ghostty, automatically use their
 Shift+Page Up/Page Down scrollback shortcuts.
 
@@ -121,7 +121,8 @@ with `wl-copy`.
 
 Chromium and Electron often expose prose as static text instead of using the
 formal paragraph role. OmaJump recognizes those blocks while filtering short
-labels, controls, and truncated list titles.
+labels, controls, and truncated list titles. Blank lines are treated as explicit
+paragraph boundaries, including short one-sentence blocks in terminal output.
 
 ### Pointer-grid fallback
 
@@ -145,6 +146,7 @@ device.
 - Python 3
 - PyGObject with the AT-SPI 2 introspection bindings
 - `wl-clipboard` for paragraph copying
+- WezTerm's local CLI for paragraph fallback in WezTerm panes that expose no AT-SPI text
 
 These are available in a standard Omarchy 4 installation. Results still depend
 on what each application publishes through AT-SPI. Native GTK apps generally
@@ -202,6 +204,9 @@ windows on active workspaces:
 - Search mode temporarily sends visible accessible names to the overlay.
 - Paragraph text remains in the helper until the selected text is passed to
   `wl-copy`.
+- For a visible WezTerm window with no accessibility tree, paragraph mode reads
+  only that pane's visible text through WezTerm's local CLI; it does not read
+  terminal scrollback unless it is currently on screen.
 - Nothing is stored or transmitted over the network.
 - The helper exits when the overlay closes.
 

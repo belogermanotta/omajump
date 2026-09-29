@@ -6,6 +6,7 @@ import argparse
 import difflib
 import json
 import math
+import os
 import re
 import subprocess
 import sys
@@ -313,10 +314,11 @@ def _title_match_score(node: Any, title: str) -> float:
     return 1.0 - difflib.SequenceMatcher(None, left, right).ratio()
 
 
-def _children(node: Any, limit: int = 2000) -> list[Any]:
+def _child_snapshot(node: Any, limit: int = 2000) -> tuple[list[Any], int]:
     children: list[Any] = []
     try:
-        count = min(int(node.get_child_count()), limit)
+        declared = max(0, int(node.get_child_count()))
+        count = min(declared, limit)
         for index in range(count):
             try:
                 child = node.get_child_at_index(index)
@@ -325,21 +327,28 @@ def _children(node: Any, limit: int = 2000) -> list[Any]:
             except Exception:
                 continue
     except Exception:
-        pass
-    return children
+        return [], 0
+    return children, declared
 
 
-def _prime_accessibility(node: Any, timeout: float = 0.3) -> None:
+def _children(node: Any, limit: int = 2000) -> list[Any]:
+    return _child_snapshot(node, limit)[0]
+
+
+def _prime_accessibility(
+    node: Any,
+    timeout: float = 0.3,
+    children: list[Any] | None = None,
+    declared_children: int | None = None,
+) -> list[Any]:
     """Wake lazy accessibility trees, notably Chromium/Electron renderers."""
 
-    if _children(node):
-        return
-    try:
-        declared_children = int(node.get_child_count())
-    except Exception:
-        declared_children = 0
-    if declared_children <= 0:
-        return
+    if children is None:
+        children, declared_children = _child_snapshot(node)
+    if children:
+        return children
+    if not declared_children:
+        return []
     for method_name in ("get_attributes", "get_relation_set"):
         try:
             getattr(node, method_name)()
@@ -347,9 +356,11 @@ def _prime_accessibility(node: Any, timeout: float = 0.3) -> None:
             pass
     deadline = time.monotonic() + max(0.0, timeout)
     while time.monotonic() < deadline:
-        if _children(node):
-            return
+        children = _children(node)
+        if children:
+            return children
         time.sleep(0.02)
+    return []
 
 
 def _top_level_frames(application: Any, Atspi: Any) -> list[tuple[Any, Rect]]:
@@ -487,6 +498,175 @@ def _node_text(node: Any, limit: int = 240) -> str:
     return " ".join(" ".join(values).split())[:limit]
 
 
+def _node_text_range(
+    node: Any, limit: int = 20_000, prefer_tail: bool = False
+) -> tuple[str, int, Any | None]:
+    """Return paragraph text, its AT-SPI offset, and the text interface.
+
+    Paragraph mode must preserve line breaks. Terminals can expose a very large
+    scrollback buffer, so read its most recent bounded tail instead of the
+    oldest text.
+    """
+
+    try:
+        text_iface = node.get_text_iface()
+        count = max(0, int(text_iface.get_character_count()))
+        start = max(0, count - limit) if prefer_tail else 0
+        end = min(count, start + limit)
+        value = str(text_iface.get_text(start, end) or "")
+        if value.strip():
+            return value, start, text_iface
+    except Exception:
+        pass
+    try:
+        value = str(node.get_name() or "")[:limit]
+    except Exception:
+        value = ""
+    return value, 0, None
+
+
+def _paragraph_ranges(text: str) -> list[tuple[int, int, str, bool]]:
+    """Split text at blank lines while retaining source offsets."""
+
+    breaks = list(re.finditer(r"(?:\r?\n)[^\S\r\n]*(?:\r?\n)+", text))
+    bounds: list[tuple[int, int]] = []
+    start = 0
+    for match in breaks:
+        bounds.append((start, match.start()))
+        start = match.end()
+    bounds.append((start, len(text)))
+
+    ranges: list[tuple[int, int, str, bool]] = []
+    for raw_start, raw_end in bounds:
+        while raw_start < raw_end and text[raw_start].isspace():
+            raw_start += 1
+        while raw_end > raw_start and text[raw_end - 1].isspace():
+            raw_end -= 1
+        if raw_start < raw_end:
+            ranges.append((raw_start, raw_end, text[raw_start:raw_end], bool(breaks)))
+    return ranges
+
+
+def _range_rect(text_iface: Any, start: int, end: int, Atspi: Any) -> Rect | None:
+    try:
+        extent = text_iface.get_range_extents(start, end, Atspi.CoordType.SCREEN)
+        rect = Rect(float(extent.x), float(extent.y), float(extent.width), float(extent.height))
+        return rect if rect.width > 0 and rect.height > 0 else None
+    except Exception:
+        return None
+
+
+def _approximate_range_rect(container: Rect, text: str, start: int, end: int) -> Rect:
+    """Estimate line geometry when a toolkit omits AT-SPI range extents."""
+
+    line_count = max(1, text.count("\n") + 1)
+    first_line = min(line_count - 1, text.count("\n", 0, start))
+    last_line = min(line_count - 1, text.count("\n", 0, end))
+    line_height = container.height / line_count
+    return Rect(
+        container.x,
+        container.y + first_line * line_height,
+        container.width,
+        max(line_height, (last_line - first_line + 1) * line_height),
+    )
+
+
+def _wezterm_panes() -> list[dict[str, Any]]:
+    """Return bounded local WezTerm pane metadata, when available."""
+
+    try:
+        completed = subprocess.run(
+            ["wezterm", "cli", "list", "--format", "json"],
+            check=True,
+            text=True,
+            capture_output=True,
+            timeout=1.5,
+        )
+        payload = json.loads(completed.stdout)
+    except (FileNotFoundError, subprocess.SubprocessError, json.JSONDecodeError):
+        return []
+    if not isinstance(payload, list):
+        return []
+    return [item for item in payload[:100] if isinstance(item, dict)]
+
+
+def _is_wezterm_client(client: Client) -> bool:
+    if client.class_name.casefold() not in {
+        "org.wezfurlong.wezterm",
+        "wezterm",
+        "wezterm-gui",
+    }:
+        return False
+    try:
+        executable = os.path.basename(os.readlink(f"/proc/{client.pid}/exe"))
+    except OSError:
+        return False
+    return executable in {"wezterm", "wezterm-gui"}
+
+
+def _wezterm_paragraph_targets(
+    client: Client, monitor: Monitor, panes: list[dict[str, Any]]
+) -> list["ParagraphTarget"]:
+    """Read visible WezTerm text when the terminal publishes no AT-SPI tree."""
+
+    if not _is_wezterm_client(client):
+        return []
+    title = " ".join(client.title.casefold().split())
+    matches = [
+        pane
+        for pane in panes
+        if title
+        and title
+        in {
+            " ".join(str(pane.get("title", "")).casefold().split()),
+            " ".join(str(pane.get("window_title", "")).casefold().split()),
+        }
+    ]
+    if len(matches) != 1:
+        return []
+    try:
+        pane_id = int(matches[0]["pane_id"])
+        rows = max(1, min(1000, int(matches[0].get("size", {}).get("rows", 0))))
+        if pane_id < 0:
+            return []
+        completed = subprocess.run(
+            [
+                "wezterm", "cli", "get-text", "--pane-id", str(pane_id),
+                "--start-line", "0",
+            ],
+            check=True,
+            text=True,
+            capture_output=True,
+            timeout=1.5,
+        )
+    except (KeyError, TypeError, ValueError, FileNotFoundError, subprocess.SubprocessError):
+        return []
+
+    # A visible pane is small, but cap untrusted terminal output defensively.
+    text = completed.stdout[:100_000]
+    ranges = _paragraph_ranges(text)
+    if not any(separated for _start, _end, _text, separated in ranges):
+        return []
+
+    local_x = client.rect.x - monitor.rect.x
+    local_y = client.rect.y - monitor.rect.y
+    line_height = client.rect.height / rows
+    targets: list[ParagraphTarget] = []
+    for start, end, paragraph, separated in ranges:
+        if not _is_paragraph_like("terminal", paragraph, client.rect, separated):
+            continue
+        first_row = min(rows - 1, text.count("\n", 0, start))
+        last_row = min(rows - 1, text.count("\n", 0, end))
+        rect = Rect(
+            local_x,
+            local_y + first_row * line_height,
+            client.rect.width,
+            max(line_height, (last_row - first_row + 1) * line_height),
+        )
+        targets.append(ParagraphTarget(paragraph, None, client, monitor, rect))
+    return targets
+
+
 def _is_scrollable(node: Any, role: str) -> bool:
     if role in SCROLLABLE_ROLES:
         return True
@@ -501,12 +681,22 @@ def _is_scrollable(node: Any, role: str) -> bool:
         return False
 
 
-def _is_paragraph_like(role: str, text: str, rect: Rect) -> bool:
+def _is_paragraph_like(
+    role: str, text: str, rect: Rect, separated_by_gap: bool = False
+) -> bool:
     """Recognize prose blocks in Chromium trees that expose them as static text."""
 
     if role == "paragraph":
         return bool(text.strip())
-    if role not in {"section", "static", "text"}:
+    if role not in {"section", "static", "terminal", "text"}:
+        return False
+    # A blank line is an explicit author/toolkit paragraph boundary. Respect it
+    # even when the resulting block contains only one short sentence.
+    if separated_by_gap:
+        return bool(text.strip())
+    # A terminal without blank-line boundaries is usually prompts and command
+    # output rather than a selectable prose block.
+    if role == "terminal":
         return False
     words = text.split()
     if len(words) < 7 or len(text) < 40 or text.endswith("…"):
@@ -540,7 +730,7 @@ class ScrollTarget:
 @dataclass(slots=True)
 class ParagraphTarget:
     text: str
-    node: object
+    node: object | None
     client: Client
     monitor: Monitor
     rect: Rect
@@ -619,6 +809,16 @@ class BackendSession:
         used_inventory: set[int] = set()
         windows_scanned = 0
         windows_considered = sum(len(clients) for clients, _monitor in contexts)
+        wezterm_panes = (
+            _wezterm_panes()
+            if mode == "paragraph"
+            and any(
+                _is_wezterm_client(client)
+                for clients, _monitor in contexts
+                for client in clients
+            )
+            else []
+        )
 
         for clients, current_monitor in contexts:
             matches = _match_windows(
@@ -629,7 +829,7 @@ class BackendSession:
             for client, frame, frame_rect in matches:
                 window_candidates: list[Candidate] = []
                 window_scroll_targets: list[ScrollTarget] = []
-                _prime_accessibility(frame)
+                frame_children = _prime_accessibility(frame)
                 mapper = CoordinateMapper.infer(client, current_monitor, frame_rect)
                 stack: list[tuple[Any, int, float]] = [(frame, 0, mapper.base_scale)]
                 window_nodes = 0
@@ -645,11 +845,20 @@ class BackendSession:
                         if raw_rect is not None
                         else inherited_scale
                     )
-                    states = _node_states(node, Atspi)
                     visible = mapper.visible_rect(raw_rect, node_scale) if raw_rect is not None else None
 
                     if mode == "hints":
-                        selected = choose_action(role, _action_names(node), states)
+                        actionable_role = role not in STRUCTURAL_ROLES
+                        states = (
+                            _node_states(node, Atspi)
+                            if visible is not None and actionable_role
+                            else set()
+                        )
+                        selected = (
+                            None
+                            if not actionable_role
+                            else choose_action(role, _action_names(node), states)
+                        )
                         covers_window = (
                             visible is not None
                             and visible.area / max(1.0, client.rect.area) >= 0.65
@@ -678,6 +887,11 @@ class BackendSession:
                                 )
                             )
                     elif mode == "search":
+                        states = (
+                            _node_states(node, Atspi)
+                            if visible is not None and role in TEXT_ROLES
+                            else set()
+                        )
                         if (
                             visible is not None
                             and role in TEXT_ROLES
@@ -694,25 +908,60 @@ class BackendSession:
                                     )
                                 )
                     elif mode == "paragraph":
+                        paragraph_role = role in {
+                            "paragraph", "section", "static", "terminal", "text"
+                        }
+                        states = (
+                            _node_states(node, Atspi)
+                            if visible is not None and paragraph_role
+                            else set()
+                        )
                         if (
                             visible is not None
-                            and role in {"paragraph", "section", "static", "text"}
+                            and paragraph_role
                             and {"showing", "visible"}.issubset(states)
                             and visible.width >= 2
                             and visible.height >= 2
                         ):
-                            text = _node_text(node, limit=20_000)
-                            if _is_paragraph_like(role, text, mapper.overlay_rect(visible)):
+                            source, source_offset, text_iface = _node_text_range(
+                                node, prefer_tail=role == "terminal"
+                            )
+                            ranges = _paragraph_ranges(source)
+                            for start, end, text, separated in ranges:
+                                block_raw = (
+                                    _range_rect(
+                                        text_iface,
+                                        source_offset + start,
+                                        source_offset + end,
+                                        Atspi,
+                                    )
+                                    if text_iface is not None
+                                    else None
+                                )
+                                block_visible = (
+                                    mapper.visible_rect(block_raw, node_scale)
+                                    if block_raw is not None
+                                    else visible
+                                    if len(ranges) == 1
+                                    else _approximate_range_rect(visible, source, start, end)
+                                )
+                                if block_visible is None or not _is_paragraph_like(
+                                    role,
+                                    text,
+                                    mapper.overlay_rect(block_visible),
+                                    separated,
+                                ):
+                                    continue
                                 paragraph_targets.append(
                                     ParagraphTarget(
                                         text, node, client, current_monitor,
-                                        mapper.overlay_rect(visible),
+                                        mapper.overlay_rect(block_visible),
                                     )
                                 )
                     elif (
                         visible is not None
                         and _is_scrollable(node, role)
-                        and {"showing", "visible"}.issubset(states)
+                        and {"showing", "visible"}.issubset(_node_states(node, Atspi))
                         and visible.width >= 64
                         and visible.height >= 64
                     ):
@@ -721,10 +970,18 @@ class BackendSession:
                         )
 
                     if depth < 48:
-                        children = _children(node)
-                        if not children:
-                            _prime_accessibility(node, timeout=0.12)
-                            children = _children(node)
+                        if node is frame:
+                            children = frame_children
+                            declared_children = len(frame_children)
+                        else:
+                            children, declared_children = _child_snapshot(node)
+                        if not children and declared_children:
+                            children = _prime_accessibility(
+                                node,
+                                timeout=0.12,
+                                children=children,
+                                declared_children=declared_children,
+                            )
                         stack.extend(
                             (child, depth + 1, node_scale) for child in reversed(children)
                         )
@@ -781,6 +1038,12 @@ class BackendSession:
                     for client in clients
                     if id(client) not in matched_client_ids
                 )
+            elif mode == "paragraph" and wezterm_panes:
+                for client in clients:
+                    if _is_wezterm_client(client):
+                        paragraph_targets.extend(
+                            _wezterm_paragraph_targets(client, current_monitor, wezterm_panes)
+                        )
 
         # Remove repeated accessible text fragments and nested duplicate regions.
         unique_search: list[SearchTarget] = []
@@ -1017,22 +1280,28 @@ class BackendSession:
         )
         mods = "SHIFT" if terminal else ""
         key = "PAGE_UP" if direction < 0 else "PAGE_DOWN"
-        command = (
-            f'hl.dsp.send_shortcut({{ mods = "{mods}", key = "{key}", '
-            f'window = "{selector}" }})'
+        commands = (
+            f'hl.dsp.send_key_state({{ mods = "{mods}", key = "{key}", '
+            f'state = "down", window = "{selector}" }})',
+            f'hl.dsp.send_key_state({{ mods = "{mods}", key = "{key}", '
+            f'state = "up", window = "{selector}" }})',
         )
         try:
-            completed = subprocess.run(
-                ["hyprctl", "dispatch", command],
-                check=True,
-                text=True,
-                capture_output=True,
-                timeout=1.5,
-            )
-            if completed.stdout.strip() != "ok":
-                raise BackendError(
-                    "scroll-failed", completed.stdout.strip() or "Hyprland rejected the scroll action"
+            for index, command in enumerate(commands):
+                completed = subprocess.run(
+                    ["hyprctl", "dispatch", command],
+                    check=True,
+                    text=True,
+                    capture_output=True,
+                    timeout=1.5,
                 )
+                if completed.stdout.strip() != "ok":
+                    raise BackendError(
+                        "scroll-failed",
+                        completed.stdout.strip() or "Hyprland rejected the scroll action",
+                    )
+                if index == 0:
+                    time.sleep(0.05)
         except (FileNotFoundError, subprocess.SubprocessError) as error:
             raise BackendError("scroll-failed", f"Could not send the scroll action: {error}") from error
         return {"type": "scrolled", "id": target_id, "direction": direction, "ok": True}

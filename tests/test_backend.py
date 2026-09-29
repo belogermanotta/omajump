@@ -12,11 +12,16 @@ from omajump.backend import (
     SearchTarget,
     ScrollTarget,
     _prime_accessibility,
+    _approximate_range_rect,
+    _child_snapshot,
     _omajump_layers_visible,
     _is_paragraph_like,
+    _node_text_range,
     _screen_geometry,
     _screens_geometry,
+    _paragraph_ranges,
     _title_match_score,
+    _wezterm_paragraph_targets,
     choose_action,
     process_distance,
 )
@@ -67,6 +72,90 @@ class ActionSelectionTests(unittest.TestCase):
         self.assertFalse(
             _is_paragraph_like("static", "Open settings and preferences", Rect(0, 0, 300, 18))
         )
+
+    def test_blank_line_makes_one_sentence_a_paragraph(self) -> None:
+        ranges = _paragraph_ranges("Prompt output\n\nOne sentence.\n\nNext block")
+        self.assertEqual([item[2] for item in ranges], ["Prompt output", "One sentence.", "Next block"])
+        self.assertTrue(
+            _is_paragraph_like("terminal", ranges[1][2], Rect(0, 0, 300, 18), ranges[1][3])
+        )
+        self.assertEqual(
+            _approximate_range_rect(Rect(10, 20, 300, 60), "First\n\nSecond", 7, 13),
+            Rect(10, 60, 300, 20),
+        )
+
+    def test_terminal_text_reads_bounded_tail_even_when_node_has_a_name(self) -> None:
+        class TextNode:
+            def get_name(self) -> str:
+                return "Terminal title"
+
+            def get_text_iface(self) -> "TextNode":
+                return self
+
+            def get_character_count(self) -> int:
+                return 30_000
+
+            def get_text(self, start: int, end: int) -> str:
+                return f"{start}:{end}\n\nRecent paragraph."
+
+        text, offset, iface = _node_text_range(TextNode(), limit=20_000, prefer_tail=True)
+        self.assertEqual(offset, 10_000)
+        self.assertEqual(text, "10000:30000\n\nRecent paragraph.")
+        self.assertIsNotNone(iface)
+
+    def test_wezterm_fallback_maps_blank_line_blocks_to_rows(self) -> None:
+        monitor = Monitor("test", Rect(0, 0, 1000, 800), monitor_id=2)
+        client = Client(
+            42, Rect(100, 100, 500, 400), 2,
+            title="notes", class_name="org.wezfurlong.wezterm",
+        )
+        panes = [{"pane_id": 7, "title": "notes", "size": {"rows": 40}}]
+        with (
+            patch("omajump.backend.os.readlink", return_value="/usr/bin/wezterm-gui"),
+            patch(
+                "omajump.backend.subprocess.run",
+                return_value=SimpleNamespace(stdout="First sentence.\n\nSecond sentence.\n"),
+            ) as run,
+        ):
+            targets = _wezterm_paragraph_targets(client, monitor, panes)
+        self.assertEqual([target.text for target in targets], ["First sentence.", "Second sentence."])
+        self.assertEqual(targets[0].rect, Rect(100, 100, 500, 10))
+        self.assertEqual(targets[1].rect, Rect(100, 120, 500, 10))
+        self.assertEqual(
+            run.call_args.args[0],
+            ["wezterm", "cli", "get-text", "--pane-id", "7", "--start-line", "0"],
+        )
+
+    def test_wezterm_fallback_does_not_guess_between_duplicate_titles(self) -> None:
+        monitor = Monitor("test", Rect(0, 0, 1000, 800), monitor_id=2)
+        client = Client(
+            42, Rect(0, 0, 500, 400), 2,
+            title="shell", class_name="org.wezfurlong.wezterm",
+        )
+        panes = [
+            {"pane_id": 1, "title": "shell", "size": {"rows": 40}},
+            {"pane_id": 2, "title": "shell", "size": {"rows": 40}},
+        ]
+        with (
+            patch("omajump.backend.os.readlink", return_value="/usr/bin/wezterm-gui"),
+            patch("omajump.backend.subprocess.run") as run,
+        ):
+            self.assertEqual(_wezterm_paragraph_targets(client, monitor, panes), [])
+        run.assert_not_called()
+
+    def test_wezterm_fallback_rejects_spoofed_window_class(self) -> None:
+        monitor = Monitor("test", Rect(0, 0, 1000, 800), monitor_id=2)
+        client = Client(
+            42, Rect(0, 0, 500, 400), 2,
+            title="notes", class_name="org.wezfurlong.wezterm",
+        )
+        panes = [{"pane_id": 7, "title": "notes", "size": {"rows": 40}}]
+        with (
+            patch("omajump.backend.os.readlink", return_value="/tmp/not-wezterm"),
+            patch("omajump.backend.subprocess.run") as run,
+        ):
+            self.assertEqual(_wezterm_paragraph_targets(client, monitor, panes), [])
+        run.assert_not_called()
 
 
 class OverlayReleaseTests(unittest.TestCase):
@@ -210,10 +299,13 @@ class ActivationTests(unittest.TestCase):
         ) as run:
             response = session.scroll(0, 1)
         self.assertTrue(response["ok"])
-        command = run.call_args.args[0][-1]
-        self.assertIn('mods = "SHIFT"', command)
-        self.assertIn('key = "PAGE_DOWN"', command)
-        self.assertIn('window = "address:0xabc123"', command)
+        self.assertEqual(run.call_count, 2)
+        commands = [call.args[0][-1] for call in run.call_args_list]
+        self.assertIn('mods = "SHIFT"', commands[0])
+        self.assertIn('key = "PAGE_DOWN"', commands[0])
+        self.assertIn('state = "down"', commands[0])
+        self.assertIn('window = "address:0xabc123"', commands[0])
+        self.assertIn('state = "up"', commands[1])
 
     def test_search_enter_clicks_match_center_in_exact_window(self) -> None:
         session = BackendSession()
@@ -372,6 +464,12 @@ class AccessibilityPrimingTests(unittest.TestCase):
         node = _LazyNode()
         _prime_accessibility(node, timeout=0)
         self.assertTrue(node.primed)
+
+    def test_child_snapshot_retains_declared_lazy_count(self) -> None:
+        node = _LazyNode()
+        children, declared = _child_snapshot(node)
+        self.assertEqual(children, [])
+        self.assertEqual(declared, 1)
 
 
 if __name__ == "__main__":

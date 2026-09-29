@@ -29,6 +29,7 @@ Item {
   property int gridDepth: 0
   property bool gridMode: false
   property int selectedScrollId: -1
+  property int queuedScrollDelta: 0
   readonly property string alphabet: "abcdefghijklmnopqrstuvwxyz"
   readonly property int searchMatchCount: countSearchMatches(typedPrefix, targets.count)
   readonly property int searchSelectedId: bestSearchTargetId(typedPrefix, targets.count)
@@ -57,7 +58,7 @@ Item {
     typedPrefix = ""; statusText = ""; activationPending = false
     barActivations = []; fallbackWindows = []; baseTargets = []
     gridRect = null; gridHistory = []; gridFallbackId = -1
-    gridDepth = 0; gridMode = false; selectedScrollId = -1
+    gridDepth = 0; gridMode = false; selectedScrollId = -1; queuedScrollDelta = 0
   }
 
   function generateLabels(count) {
@@ -311,7 +312,14 @@ Item {
     else if (payload.type === "targets") handleTargets(payload)
     else if (payload.type === "activated") root.dismiss()
     else if (payload.type === "copied") root.showTransient("Paragraph copied to clipboard")
-    else if (payload.type === "scrolled") activationPending = false
+    else if (payload.type === "scrolled") {
+      activationPending = false
+      if (queuedScrollDelta !== 0) {
+        var direction = queuedScrollDelta < 0 ? -1 : 1
+        queuedScrollDelta -= direction
+        Qt.callLater(function() { root.requestScroll(direction) })
+      }
+    }
     else if (payload.type === "error") {
       activationPending = false
       showTransient(payload.message || "OmaJump could not inspect this application")
@@ -412,7 +420,11 @@ Item {
   }
 
   function requestScroll(direction) {
-    if (!helper.running || selectedScrollId < 0 || activationPending) return
+    if (!helper.running || selectedScrollId < 0) return
+    if (activationPending) {
+      queuedScrollDelta = Math.max(-4, Math.min(4, queuedScrollDelta + direction))
+      return
+    }
     activationPending = true
     helper.write(JSON.stringify({ type: "scroll", id: selectedScrollId, direction: direction }) + "\n")
   }
