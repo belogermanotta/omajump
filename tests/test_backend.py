@@ -23,6 +23,7 @@ from omajump.backend import (
     _title_match_score,
     _wezterm_paragraph_targets,
     choose_action,
+    deduplicate_paragraph_targets,
     process_distance,
 )
 from omajump.model import Candidate, Client, Monitor, Rect
@@ -156,6 +157,46 @@ class ActionSelectionTests(unittest.TestCase):
         ):
             self.assertEqual(_wezterm_paragraph_targets(client, monitor, panes), [])
         run.assert_not_called()
+
+    def test_nested_paragraph_subtext_is_deduplicated(self) -> None:
+        monitor = Monitor("test", Rect(0, 0, 1200, 800), monitor_id=2)
+        client = Client(42, Rect(0, 0, 1200, 800), 2)
+        complete = ParagraphTarget(
+            "I updated notes/HOME.md to make the homepage more useful: it now shows "
+            "projects from the Werlion Board's In Progress column, filters blank "
+            "placeholder tasks from today's actions, and puts the seven-day check-in "
+            "ahead of recent notes.",
+            object(), client, monitor, Rect(20, 19, 1169, 123),
+        )
+        nested_tail = ParagraphTarget(
+            "from the Werlion Board's In Progress column, filters blank placeholder "
+            "tasks from today's actions, and puts the seven-day check-in ahead of "
+            "recent notes.",
+            object(), client, monitor, Rect(24, 64, 1117, 78),
+        )
+        weekly = ParagraphTarget(
+            "The weekly view now uses the last seven calendar days, counts only "
+            "recorded habit scores, and shows missing days instead of zero.",
+            object(), client, monitor, Rect(20, 175, 1175, 167),
+        )
+
+        self.assertEqual(
+            deduplicate_paragraph_targets([complete, nested_tail, weekly]),
+            [complete, weekly],
+        )
+
+    def test_equal_paragraph_text_prefers_tighter_geometry(self) -> None:
+        monitor = Monitor("test", Rect(0, 0, 1200, 800), monitor_id=2)
+        client = Client(42, Rect(0, 0, 1200, 800), 2)
+        loose = ParagraphTarget(
+            "The same accessible paragraph text.",
+            object(), client, monitor, Rect(10, 10, 600, 100),
+        )
+        precise = ParagraphTarget(
+            "The same accessible paragraph text.",
+            object(), client, monitor, Rect(20, 20, 580, 80),
+        )
+        self.assertEqual(deduplicate_paragraph_targets([loose, precise]), [precise])
 
 
 class OverlayReleaseTests(unittest.TestCase):

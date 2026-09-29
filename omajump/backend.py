@@ -704,6 +704,52 @@ def _is_paragraph_like(
     return rect.height >= 24 or len(text) >= 100
 
 
+def deduplicate_paragraph_targets(
+    targets: list["ParagraphTarget"],
+) -> list["ParagraphTarget"]:
+    """Collapse nested AT-SPI fragments that describe one prose block.
+
+    Browser accessibility trees often expose a complete paragraph and one or
+    more child static-text nodes containing wrapped subsets of the same text.
+    Prefer the most complete text; for equal text, prefer tighter geometry.
+    """
+
+    normalized = [" ".join(target.text.casefold().split()) for target in targets]
+    ranked = sorted(
+        range(len(targets)),
+        key=lambda index: (-len(normalized[index]), targets[index].rect.area, index),
+    )
+    kept: list[int] = []
+    for index in ranked:
+        candidate = targets[index]
+        candidate_text = normalized[index]
+        duplicate = False
+        for kept_index in kept:
+            existing = targets[kept_index]
+            existing_text = normalized[kept_index]
+            if (
+                candidate.monitor.name != existing.monitor.name
+                or candidate.client != existing.client
+                or not candidate_text
+                or not existing_text
+                or (
+                    candidate_text not in existing_text
+                    and existing_text not in candidate_text
+                )
+            ):
+                continue
+            overlap = candidate.rect.intersection(existing.rect)
+            smaller_area = min(candidate.rect.area, existing.rect.area)
+            if overlap is not None and smaller_area > 0 and overlap.area / smaller_area >= 0.8:
+                duplicate = True
+                break
+        if not duplicate:
+            kept.append(index)
+
+    # Retain discovery order so target IDs remain stable across scans.
+    return [targets[index] for index in sorted(kept)]
+
+
 @dataclass(slots=True)
 class FallbackTarget:
     client: Client
@@ -1061,21 +1107,7 @@ class BackendSession:
                 search_keys.add(key)
                 unique_search.append(item)
         search_targets = unique_search[:1500]
-        unique_paragraphs: list[ParagraphTarget] = []
-        paragraph_keys: set[tuple[Any, ...]] = set()
-        for item in paragraph_targets:
-            key = (
-                item.monitor.name,
-                item.text.casefold(),
-                round(item.rect.x),
-                round(item.rect.y),
-                round(item.rect.width),
-                round(item.rect.height),
-            )
-            if key not in paragraph_keys:
-                paragraph_keys.add(key)
-                unique_paragraphs.append(item)
-        paragraph_targets = unique_paragraphs[: self.max_targets]
+        paragraph_targets = deduplicate_paragraph_targets(paragraph_targets)[: self.max_targets]
         if len(candidates) > self.max_targets:
             candidates = candidates[: self.max_targets]
             truncated = True
